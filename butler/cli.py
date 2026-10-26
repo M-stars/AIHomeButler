@@ -22,6 +22,7 @@ from .devices.registry import DeviceRegistry
 from .llm_client import OpenAICompatClient
 from .logging_setup import setup_logging
 from .memory.store import MemoryStore
+from .proactive import RuleEngine, build_proactive_tools
 from .tools.executor import ToolExecutor
 from .tools.home import build_default_devices, build_home_tools
 from .tools.memory_tools import build_memory_tools
@@ -79,6 +80,17 @@ def _print_step(step: dict) -> None:
     print(f"  [{mark} 步骤] {step.get('tool')} → {status}：{step.get('message', '')}")
 
 
+def _deliver_notifications(rule_engine: RuleEngine) -> None:
+    """每轮对话后检查主动规则，把新通知呈现给用户。"""
+    try:
+        fired = rule_engine.run_checks()
+    except Exception:
+        logging.getLogger("butler.cli").exception("主动规则检查失败")
+        return
+    for notification in fired:
+        print(f"  [🔔 主动提醒] {notification['message']}")
+
+
 def _run_task(config: ButlerConfig, registry: DeviceRegistry, memory_store: MemoryStore, user_text: str) -> None:
     """阶段 6 的多步骤任务入口。"""
     from .planner import PlanRunner
@@ -98,11 +110,15 @@ def _build_registry(config: ButlerConfig) -> DeviceRegistry:
     return build_default_devices(config.data_dir)
 
 
-def _build_agent(config: ButlerConfig, registry: DeviceRegistry, memory_store: MemoryStore) -> Agent:
+def _build_agent(
+    config: ButlerConfig, registry: DeviceRegistry, memory_store: MemoryStore
+) -> tuple:
     tool_registry = ToolRegistry()
     for spec in build_home_tools(registry):
         tool_registry.register(spec)
     for spec in build_memory_tools(memory_store):
+        tool_registry.register(spec)
+    for spec in build_proactive_tools(memory_store):
         tool_registry.register(spec)
 
     confirmer = ConsoleConfirmer()
@@ -125,7 +141,7 @@ def _build_agent(config: ButlerConfig, registry: DeviceRegistry, memory_store: M
         )
 
     conversation = Conversation(system_prompt_provider(), config.max_history_messages)
-    return Agent(
+    agent = Agent(
         llm=llm,
         conversation=conversation,
         tool_registry=tool_registry,
@@ -133,6 +149,8 @@ def _build_agent(config: ButlerConfig, registry: DeviceRegistry, memory_store: M
         max_tool_calls_per_turn=config.max_tool_calls_per_turn,
         system_prompt_provider=system_prompt_provider,
     )
+    rule_engine = RuleEngine(registry, memory_store)
+    return agent, rule_engine
 
 
 def main() -> int:
@@ -149,7 +167,7 @@ def main() -> int:
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
-    agent = _build_agent(config, registry, memory_store)
+    agent, rule_engine = _build_agent(config, registry, memory_store)
 
     backend_label = (
         f"Home Assistant @ {config.ha_url}"
@@ -199,6 +217,7 @@ def main() -> int:
             mark = _STATUS_MARKS.get(event.status, "·")
             print(f"  [{mark} 工具] {event.tool}: {event.status} — {event.message}")
         print(f"管家: {result.reply}")
+        _deliver_notifications(rule_engine)
 
 
 if __name__ == "__main__":
