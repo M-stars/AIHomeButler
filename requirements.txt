@@ -1,0 +1,6 @@
+# 运行时依赖（需兼容本机 Python 3.9）
+openai>=1.40.0
+python-dotenv>=1.0.0
+
+# 测试
+pytest>=7.4.0

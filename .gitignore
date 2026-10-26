@@ -1,0 +1,17 @@
+# 密钥与本地配置（绝不提交）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 运行时数据与日志
+logs/
+data/
+
+# IDE
+.vscode/
+.idea/
