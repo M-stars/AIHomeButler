@@ -1,0 +1,83 @@
+# AI Home Butler ESP32 环境节点固件（最通用硬件方案）
+#
+# 适用硬件（最常见、最容易购买的组合，总价约 30-60 元）：
+#   - ESP32 DevKitC / ESP32-WROOM-32 开发板（38pin 窄板或 30pin 均可）
+#   - DHT22 (AM2302) 温湿度传感器（如用 DHT11，把下方 model 改为 DHT11 并注意接线）
+#   - 母对母杜邦线 3 根
+#
+# 接线（详见 docs/HARDWARE.md）：
+#   DHT22 VCC → ESP32 3V3     DHT22 DATA → GPIO4     DHT22 GND → GND
+#   （DHT22 模块自带上拉电阻；裸传感器需在 DATA 与 VCC 间加 10k 上拉）
+#   板载 GPIO2 LED 作为安全测试执行器，不接任何外部强电。
+#
+# 功能：温湿度 → Home Assistant 自动发现；GPIO2 LED 二进制灯（供 AI 控制验证）。
+#
+# 校验：esphome config firmware/esphome/esp32-butler.yaml
+# 编译：esphome compile firmware/esphome/esp32-butler.yaml
+# 烧录：esphome run firmware/esphome/esp32-butler.yaml（COM 口见 docs/HARDWARE.md）
+
+substitutions:
+  friendly_name: "AI Home Butler 环境节点"
+
+esphome:
+  name: esp32-butler
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # 首次烧录 WiFi 未配置时，设备会开放热点 Esp32-Butler-Fallback（密码见下）
+  ap:
+    ssid: "Esp32-Butler-Fallback"
+    password: "butler12345"
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+
+web_server:
+  port: 80
+
+sensor:
+  - platform: dht
+    pin: GPIO4
+    model: DHT22
+    temperature:
+      name: "客厅温度"
+      id: living_room_temperature
+    humidity:
+      name: "客厅湿度"
+      id: living_room_humidity
+    update_interval: 30s
+
+output:
+  - platform: gpio
+    pin: GPIO2
+    id: onboard_led_output
+
+light:
+  - platform: binary
+    output: onboard_led_output
+    id: test_light
+    name: "测试灯（板载LED）"
+
+button:
+  - platform: restart
+    name: "重启环境节点"
+
+text_sensor:
+  - platform: version
+    name: "固件版本"
