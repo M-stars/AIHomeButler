@@ -21,13 +21,17 @@ from .conversation import Conversation
 from .devices.registry import DeviceRegistry
 from .llm_client import OpenAICompatClient
 from .logging_setup import setup_logging
+from .memory.store import MemoryStore
 from .tools.executor import ToolExecutor
 from .tools.home import build_default_devices, build_home_tools
+from .tools.memory_tools import build_memory_tools
 from .tools.registry import ToolRegistry
 
 HELP = """命令：
   直接输入自然语言与管家对话，例如：现在客厅温度是多少？
   /devices   列出设备
+  /memory    查看已保存的长期记忆
+  /task      多步骤任务模式，例如：/task 我准备睡觉了，关掉卧室灯并打开风扇低档
   /help      显示本帮助
   /exit      退出（或 Ctrl+C）"""
 
@@ -59,6 +63,32 @@ def _print_devices(registry: DeviceRegistry) -> None:
         print(f"  {d.info.id}  {d.info.name}  [{d.info.area}]  {availability}")
 
 
+def _print_memories(memory_store: MemoryStore) -> None:
+    memories = memory_store.list()
+    if not memories:
+        print("  （暂无长期记忆。对话中说『记住我喜欢……』即可保存，保存前会请你确认。）")
+        return
+    kind_label = {"preference": "偏好", "fact": "事实"}
+    for m in memories:
+        print(f"  #{m['id']} [{kind_label.get(m['kind'], m['kind'])}] {m['content']}  ({m['updated_at']})")
+
+
+def _print_step(step: dict) -> None:
+    status = step.get("status", "pending")
+    mark = {"ok": "✓", "error": "✗", "declined": "⊘", "unknown": "?"}.get(status, "·")
+    print(f"  [{mark} 步骤] {step.get('tool')} → {status}：{step.get('message', '')}")
+
+
+def _run_task(config: ButlerConfig, registry: DeviceRegistry, memory_store: MemoryStore, user_text: str) -> None:
+    """阶段 6 的多步骤任务入口。"""
+    from .planner import PlanRunner
+
+    runner = PlanRunner.for_cli(config, registry, memory_store)
+    report = runner.run(user_text, on_step=_print_step)
+    print(f"任务结果：{report['status']}")
+    print(report["summary"])
+
+
 def _build_registry(config: ButlerConfig) -> DeviceRegistry:
     """按配置选择设备后端：模拟（默认，安全）或 Home Assistant（真实设备）。"""
     if config.device_backend == BACKEND_HOMEASSISTANT:
@@ -68,9 +98,11 @@ def _build_registry(config: ButlerConfig) -> DeviceRegistry:
     return build_default_devices(config.data_dir)
 
 
-def _build_agent(config: ButlerConfig, registry: DeviceRegistry) -> Agent:
+def _build_agent(config: ButlerConfig, registry: DeviceRegistry, memory_store: MemoryStore) -> Agent:
     tool_registry = ToolRegistry()
     for spec in build_home_tools(registry):
+        tool_registry.register(spec)
+    for spec in build_memory_tools(memory_store):
         tool_registry.register(spec)
 
     confirmer = ConsoleConfirmer()
@@ -86,16 +118,20 @@ def _build_agent(config: ButlerConfig, registry: DeviceRegistry) -> Agent:
         timeout_seconds=config.llm_timeout_seconds,
         max_retries=config.llm_max_retries,
     )
-    conversation = Conversation(
-        build_system_prompt(_inventory(registry), datetime.now()),
-        max_messages=config.max_history_messages,
-    )
+
+    def system_prompt_provider() -> str:
+        return build_system_prompt(
+            _inventory(registry), datetime.now(), memory_store.prompt_block()
+        )
+
+    conversation = Conversation(system_prompt_provider(), config.max_history_messages)
     return Agent(
         llm=llm,
         conversation=conversation,
         tool_registry=tool_registry,
         tool_executor=executor,
         max_tool_calls_per_turn=config.max_tool_calls_per_turn,
+        system_prompt_provider=system_prompt_provider,
     )
 
 
@@ -112,7 +148,8 @@ def main() -> int:
         logger.warning("CONFIRMATION_MODE=never：控制类操作不再请求确认，仅限调试环境使用！")
 
     registry = _build_registry(config)
-    agent = _build_agent(config, registry)
+    memory_store = MemoryStore(config.data_dir / "memory.db")
+    agent = _build_agent(config, registry, memory_store)
 
     backend_label = (
         f"Home Assistant @ {config.ha_url}"
@@ -146,6 +183,15 @@ def main() -> int:
             continue
         if line == "/devices":
             _print_devices(registry)
+            continue
+        if line == "/memory":
+            _print_memories(memory_store)
+            continue
+        if line.startswith("/task "):
+            _run_task(config, registry, memory_store, line[len("/task "):].strip())
+            continue
+        if line == "/task":
+            print("用法：/task 任务描述（例如 /task 我准备睡觉了，关掉卧室灯）")
             continue
 
         result = agent.process(line)

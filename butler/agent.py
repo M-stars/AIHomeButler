@@ -32,19 +32,28 @@ class AgentTurnResult:
     stopped_by_limit: bool = False
 
 
-def build_system_prompt(device_inventory: str, now: datetime) -> str:
+def build_system_prompt(
+    device_inventory: str,
+    now: datetime,
+    memory_block: str = "（暂无已保存的长期记忆）",
+) -> str:
     return f"""你是"AI Home Butler"家庭的 AI 管家（Butler），通过调用工具了解和操作家庭设备。
 当前时间：{now.strftime('%Y-%m-%d %H:%M')}。
 
 家庭设备清单：
 {device_inventory}
 
+用户长期记忆（由用户确认保存，可随时修改或删除）：
+{memory_block}
+
 规则：
 1. 传感器数值、设备状态必须通过工具获取，禁止编造；工具没有的数据就如实说没有。
 2. 控制设备（开/关/调节）前确保设备与参数正确；用户拒绝确认时，不得再次尝试，
    也不得声称操作已执行。
 3. 只能使用已注册的工具；工具返回错误或状态未知时，如实向用户说明，不得宣称成功。
-4. 回答使用简体中文，简洁自然；执行操作后报告结果与设备当前状态。
+4. 只有当用户明确陈述稳定的偏好或事实并希望建议记住时，才调用 save_memory，
+   且内容必须是用户原意；禁止把你的推测存为记忆。
+5. 回答使用简体中文，简洁自然；执行操作后报告结果与设备当前状态。
 """
 
 
@@ -56,6 +65,7 @@ class Agent:
         tool_registry: ToolRegistry,
         tool_executor: ToolExecutor,
         max_tool_calls_per_turn: int = 8,
+        system_prompt_provider=None,
         logger: logging.Logger = None,
     ) -> None:
         self._llm = llm
@@ -63,10 +73,14 @@ class Agent:
         self._registry = tool_registry
         self._executor = tool_executor
         self._max_calls = max(1, int(max_tool_calls_per_turn))
+        self._prompt_provider = system_prompt_provider
         self._log = logger or _log
 
     def process(self, user_text: str) -> AgentTurnResult:
         """处理一轮用户输入。任何异常都收敛为可读回复，不崩溃、不死循环。"""
+        if self._prompt_provider is not None:
+            # 每轮刷新系统提示词，让最新记忆立即参与决策
+            self._conv.update_system_prompt(self._prompt_provider())
         self._conv.add_user(user_text)
         events: List[ToolEvent] = []
 

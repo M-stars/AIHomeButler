@@ -32,6 +32,10 @@ class Conversation:
         self._messages.append(Message(role="user", content=text))
         self._trim()
 
+    def update_system_prompt(self, text: str) -> None:
+        """刷新系统提示词（用于每轮注入最新记忆快照）。"""
+        self._messages[0] = Message(role="system", content=text)
+
     def add_assistant_text(self, text: Optional[str]) -> None:
         self._messages.append(Message(role="assistant", content=text or ""))
 
