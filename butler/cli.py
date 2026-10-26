@@ -111,7 +111,10 @@ def _build_registry(config: ButlerConfig) -> DeviceRegistry:
 
 
 def _build_agent(
-    config: ButlerConfig, registry: DeviceRegistry, memory_store: MemoryStore
+    config: ButlerConfig,
+    registry: DeviceRegistry,
+    memory_store: MemoryStore,
+    confirmer=None,
 ) -> tuple:
     tool_registry = ToolRegistry()
     for spec in build_home_tools(registry):
@@ -121,7 +124,7 @@ def _build_agent(
     for spec in build_proactive_tools(memory_store):
         tool_registry.register(spec)
 
-    confirmer = ConsoleConfirmer()
+    confirmer = confirmer or ConsoleConfirmer()
     executor = ToolExecutor(
         tool_registry,
         confirmer,

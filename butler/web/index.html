@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Home Butler</title>
+<style>
+  :root { --bg:#0f1420; --card:#171e2e; --line:#26304a; --text:#e6ecff; --dim:#8ea0c9; --ok:#4ade80; --bad:#f87171; --warn:#fbbf24; --accent:#6ea8fe; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font:15px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; padding:18px; }
+  h1 { font-size:20px; margin-bottom:4px; }
+  .sub { color:var(--dim); font-size:13px; margin-bottom:16px; }
+  .grid { display:grid; grid-template-columns: 1.4fr 1fr; gap:16px; max-width:1200px; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:16px; }
+  .card h2 { font-size:15px; color:var(--accent); margin-bottom:10px; }
+  #chatlog { height:320px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; }
+  .msg { padding:8px 12px; border-radius:10px; max-width:92%; white-space:pre-wrap; word-break:break-word; }
+  .user { align-self:flex-end; background:#2b4a8f; }
+  .butler { align-self:flex-start; background:#232c44; }
+  .tool { align-self:flex-start; color:var(--dim); font-size:12px; background:#1b2337; }
+  .notif { border-left:3px solid var(--warn); padding:6px 10px; background:#221d10; border-radius:6px; margin-bottom:6px; font-size:13px; }
+  .row { display:flex; gap:8px; }
+  input[type=text] { flex:1; background:#0d1220; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:9px 12px; }
+  button { background:var(--accent); color:#0b1020; border:0; border-radius:8px; padding:9px 14px; cursor:pointer; font-weight:600; }
+  button.ghost { background:#232c44; color:var(--text); }
+  button.danger { background:#7f1d1d; color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { padding:6px 8px; border-bottom:1px solid var(--line); text-align:left; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  #confirmbar { display:none; background:#3a2b10; border:1px solid #7a5a1c; border-radius:10px; padding:12px; margin-bottom:14px; max-width:1200px; margin-left:auto; margin-right:auto; }
+  .memitem, .taskitem { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 8px; border-bottom:1px solid var(--line); font-size:13px; }
+  .small { font-size:12px; color:var(--dim); }
+</style>
+</head>
+<body>
+<h1>🏠 AI Home Butler</h1>
+<div class="sub" id="subline">正在连接…</div>
+<div id="confirmbar">
+  <b>⚠️ 操作确认请求</b>
+  <div id="confirmbody"></div>
+</div>
+
+<div class="grid">
+  <div>
+    <div class="card">
+      <h2>对话</h2>
+      <div id="chatlog"></div>
+      <div class="row">
+        <input type="text" id="chatinput" placeholder="和管家说话，例如：现在客厅温度是多少？把客厅灯打开" />
+        <button id="sendbtn">发送</button>
+      </div>
+      <div class="small" style="margin-top:6px">多步骤任务输入 <code>/task 任务描述</code>；控制设备会在这里弹出确认请求。</div>
+    </div>
+    <div class="card">
+      <h2>主动提醒</h2>
+      <div id="notiflist" class="small">加载中…</div>
+    </div>
+  </div>
+  <div>
+    <div class="card">
+      <h2>设备</h2>
+      <table id="devicetable"><thead><tr><th>设备</th><th>状态</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>长期记忆</h2>
+      <div class="row" style="margin-bottom:8px">
+        <input type="text" id="meminput" placeholder="手动添加一条记忆（视为用户陈述）" />
+        <button id="memadd" class="ghost">添加</button>
+      </div>
+      <div id="memlist"></div>
+    </div>
+    <div class="card">
+      <h2>任务记录</h2>
+      <div id="tasklist" class="small">加载中…</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let busy = false;
+
+function addMsg(cls, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + cls;
+  div.textContent = text;
+  $("chatlog").appendChild(div);
+  $("chatlog").scrollTop = $("chatlog").scrollHeight;
+}
+
+async function jfetch(url, options) {
+  const resp = await fetch(url, options);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.detail || resp.statusText);
+  return data;
+}
+
+async function send() {
+  if (busy) return;
+  const input = $("chatinput");
+  const text = input.value.trim();
+  if (!text) return;
+  busy = true; $("sendbtn").disabled = true;
+  addMsg("user", text);
+  input.value = "";
+  const isTask = text.toLowerCase().startsWith("/task ");
+  try {
+    const data = await jfetch(isTask ? "/api/task" : "/api/chat", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text: isTask ? text.slice(6) : text}),
+    });
+    if (isTask) {
+      addMsg("tool", `任务结果：${data.status}`);
+      (data.steps || []).forEach(s => addMsg("tool", `${s.index}. ${s.tool} → ${s.status}：${s.message || ""}`));
+      addMsg("butler", data.summary || "");
+    } else {
+      (data.tool_events || []).forEach(e => addMsg("tool", `[工具] ${e.tool}: ${e.status} — ${e.message}`));
+      (data.notifications || []).forEach(n => addMsg("tool", `[主动提醒] ${n.message}`));
+      addMsg("butler", data.reply || "（无回复）");
+    }
+  } catch (err) {
+    addMsg("tool", "请求失败：" + err.message);
+  } finally {
+    busy = false; $("sendbtn").disabled = false;
+    refresh();
+  }
+}
+
+async function pollConfirmations() {
+  try {
+    const data = await jfetch("/api/confirmations");
+    const list = data.confirmations || [];
+    if (!list.length) { $("confirmbar").style.display = "none"; return; }
+    $("confirmbar").style.display = "block";
+    $("confirmbody").innerHTML = "";
+    list.forEach(c => {
+      const row = document.createElement("div");
+      row.style.marginTop = "8px";
+      const info = document.createElement("div");
+      info.textContent = c.summary + "  " + JSON.stringify(c.arguments || {});
+      const yes = document.createElement("button");
+      yes.textContent = "批准"; yes.onclick = () => respond(c.id, true);
+      const no = document.createElement("button");
+      no.textContent = "拒绝"; no.className = "danger"; no.onclick = () => respond(c.id, false);
+      row.append(info, yes, no);
+      $("confirmbody").appendChild(row);
+    });
+  } catch (e) { /* 忽略轮询错误 */ }
+}
+
+async function respond(id, approved) {
+  await jfetch("/api/confirmations/" + id, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({approved}),
+  });
+  pollConfirmations();
+}
+
+async function refreshDevices() {
+  try {
+    const data = await jfetch("/api/overview");
+    $("subline").textContent = `模型 ${data.model} ｜ 设备后端 ${data.backend} ｜ 确认模式 ${data.confirmation_mode}`;
+    const tbody = $("devicetable").querySelector("tbody");
+    tbody.innerHTML = "";
+    (data.devices || []).forEach(d => {
+      const tr = document.createElement("tr");
+      const stateText = d.available
+        ? (d.state ? JSON.stringify(d.state) : "在线")
+        : "离线";
+      tr.innerHTML = `<td>${d.name}<div class="small">${d.id}</div></td>
+        <td class="${d.available ? "ok" : "bad"}">${stateText}</td>`;
+      tbody.appendChild(tr);
+    });
+  } catch (e) { /* 忽略 */ }
+}
+
+async function refreshMemories() {
+  try {
+    const data = await jfetch("/api/memories");
+    const box = $("memlist");
+    box.innerHTML = "";
+    (data.memories || []).forEach(m => {
+      const row = document.createElement("div");
+      row.className = "memitem";
+      const label = m.kind === "preference" ? "偏好" : "事实";
+      const span = document.createElement("span");
+      span.innerHTML = `<b class="small">[${label}]</b> ${m.content}`;
+      const del = document.createElement("button");
+      del.textContent = "删除"; del.className = "danger";
+      del.onclick = async () => { await jfetch("/api/memories/" + m.id, {method: "DELETE"}); refreshMemories(); };
+      row.append(span, del);
+      box.appendChild(row);
+    });
+    if (!(data.memories || []).length) box.innerHTML = '<span class="small">暂无记忆</span>';
+  } catch (e) { /* 忽略 */ }
+}
+
+async function refreshNotifications() {
+  try {
+    const data = await jfetch("/api/notifications");
+    const box = $("notiflist");
+    box.innerHTML = "";
+    (data.notifications || []).slice(0, 8).forEach(n => {
+      const div = document.createElement("div");
+      div.className = "notif";
+      div.textContent = `${n.created_at.slice(5, 16)} ${n.message}`;
+      box.appendChild(div);
+    });
+    if (!(data.notifications || []).length) box.textContent = "暂无主动提醒。在对话里说“温度超过30度提醒我”即可创建规则。";
+  } catch (e) { /* 忽略 */ }
+}
+
+async function refreshTasks() {
+  try {
+    const data = await jfetch("/api/tasks");
+    const box = $("tasklist");
+    box.innerHTML = "";
+    (data.tasks || []).slice(0, 6).forEach(t => {
+      const div = document.createElement("div");
+      div.className = "taskitem";
+      div.innerHTML = `<span>${t.user_text.slice(0, 26)}</span><span class="${t.outcome === "completed" ? "ok" : "warn"}">${t.outcome}</span>`;
+      box.appendChild(div);
+    });
+    if (!(data.tasks || []).length) box.textContent = "暂无任务记录";
+  } catch (e) { /* 忽略 */ }
+}
+
+function refresh() { refreshDevices(); refreshMemories(); refreshNotifications(); refreshTasks(); }
+
+$("sendbtn").onclick = send;
+$("chatinput").addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+$("memadd").onclick = async () => {
+  const content = $("meminput").value.trim();
+  if (!content) return;
+  await jfetch("/api/memories", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({kind: "preference", content})});
+  $("meminput").value = "";
+  refreshMemories();
+};
+
+refresh();
+pollConfirmations();
+setInterval(refresh, 8000);
+setInterval(pollConfirmations, 2000);
+</script>
+</body>
+</html>
