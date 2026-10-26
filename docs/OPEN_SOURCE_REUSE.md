@@ -12,6 +12,12 @@
 | 3 | 环境变量/密钥管理 | python-dotenv | github.com/theskumar/python-dotenv | BSD-3-Clause | 活跃 | pip 依赖 | 否 |
 | 4 | 自动化测试 | pytest | github.com/pytest-dev/pytest | MIT | 活跃 | pip 依赖 | 否 |
 | 5 | 智能家居平台（阶段 2 采用） | Home Assistant Core | github.com/home-assistant/core | Apache-2.0 | 活跃（2026-10-26 推送） | 部署为独立服务 | 否 |
+| 6 | HTTP 客户端（HA API 调用） | httpx | github.com/encode/httpx | BSD-3-Clause | 活跃 | pip 依赖 | 否 |
+| 7 | Web 界面与 API（阶段 9） | FastAPI + Uvicorn + Pydantic | github.com/fastapi/fastapi | MIT | 活跃 | pip 依赖 | 否 |
+| 8 | 语音合成（阶段 8 桥接） | pyttsx3 → Windows SAPI5 | github.com/nateshmbhat/pyttsx3 | MPL-2.0 | 可用 | pip 依赖 | 否 |
+| 9 | 语音识别（阶段 8 桥接，可选） | faster-whisper（CTranslate2 移植） | github.com/SYSTRAN/faster-whisper | MIT | 活跃 | pip 依赖（可选） | 否 |
+| 10 | 麦克风采集（可选） | sounddevice | python-sounddevice.readthedocs.io | MIT | 活跃 | pip 依赖（可选） | 否 |
+| 11 | ESP32 固件（阶段 3 采用） | ESPHome 2025.5.2（本机已安装并完成固件编译） | github.com/esphome/esphome | GPL-3.0 + 附加授权（NOASSERTION，已人工确认 LICENSE：作为工具使用、固件产物归配置作者，合规） | 活跃 | pip 安装的工具链 | 仅写 YAML 配置 |
 
 检索关键词（#1）：`DeepSeek API OpenAI SDK compatible base_url function calling`；
 核实方式：官方文档 api-docs.deepseek.com + 本机实测（tool_calls 与结果回传全链路通过）。
@@ -22,7 +28,7 @@
 |---|---|---|---|
 | 1 | wukong-robot（悟空机器人，wzpan/wukong-robot） | MIT 许可证；GitHub API 显示最后推送 **2024-10-25**，停滞约两年 | 维护停滞；与 HA Voice 生态相比已落后；其能力（ASR/TTS/唤醒）后期由 HA 生态覆盖更稳 |
 | 2 | Home Assistant Voice / Wyoming 协议 | 官方活跃（voice-pe 硬件 + wyoming 集成，home-assistant.io/integrations/wyoming） | **阶段 8 语音的首选**；当前无语音需求，暂缓引入 |
-| 3 | ESPHome（esphome/esphome） | 活跃（changelog 2026.10.0）；GitHub license 字段 NOASSERTION（其 LICENSE 为 GPL-3.0 + 附加授权条款，引入时需人工确认） | **阶段 3 固件首选**：DHT 等传感器组件齐全，含已知问题（DHT22 读失败返回假值，esphome/issues#397，阶段 3 需做数据有效性过滤）；当前无固件需求 |
+| 3 | ESPHome（esphome/esphome） | 活跃（changelog 2026.10.0）；GitHub license 字段 NOASSERTION | ~~阶段 3 固件首选~~ → **已采用**（见上表 #11）；已知问题：DHT22 读失败返回假值（esphome/issues#397），管家侧以 sampled_at 新鲜度兜底 |
 | 4 | ESP-IDF / Arduino-ESP32 / PlatformIO | 官方 SDK 成熟（ESP-IDF 为 Apache-2.0，阶段 3 引入时再核实其余） | 仅当 ESPHome 无法满足定制需求时启用（阶段 3 决策点） |
 | 5 | Home Assistant 部署方式（Windows） | 官方建议 Windows 上以 HAOS 虚拟机运行；Docker Desktop 容器为轻量替代；WSL2 Supervised 为社区方案 | Docker 未安装 → 阶段 2 需先安装 Docker Desktop 或 VirtualBox；这是用户需完成的操作 |
 | 6 | LangChain / AutoGen / CrewAI 等 Agent 框架 | 能力覆盖工具编排，但抽象重、依赖面大 | 阶段 1 的"单 Agent + function calling + 自有执行器"即可满足且可控性/可测试性更好；待阶段 6 任务规划时重新评估 |

@@ -3,25 +3,30 @@
 在成熟开源智能家居基础设施之上构建的 AI 家庭管家：具备环境理解、记忆、任务规划、
 安全执行与主动服务能力。**不重复造 Home Assistant，不重写语音引擎。**
 
-当前状态：**阶段 1 完成** —— 最小可运行 AI 管家（CLI + 模拟设备 + 工具调用 + 安全确认）。
+当前状态：**阶段 0-11 首轮全部完成** —— 文本/网页/语音三种交互，模拟与 Home Assistant
+双设备后端，长期记忆，多步骤任务规划，主动提醒，语音播报；真实 HA 容器与 ESP32 烧录
+各差一步用户操作（见 docs/ROADMAP.md「近期待办」）。
 
 - 需求与验收：[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)
 - 架构设计：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - 技术选型：[docs/TECH_STACK_DECISIONS.md](docs/TECH_STACK_DECISIONS.md)
 - 开源复用记录：[docs/OPEN_SOURCE_REUSE.md](docs/OPEN_SOURCE_REUSE.md)
+- 运行维护手册：[docs/RUNBOOK.md](docs/RUNBOOK.md)
+- 硬件接入：[docs/HARDWARE.md](docs/HARDWARE.md) ｜ 语音：[docs/VOICE.md](docs/VOICE.md)
 - 路线图：[docs/ROADMAP.md](docs/ROADMAP.md)
 
-## 阶段 1 能做什么
+## 能做什么
 
-- 命令行多轮自然语言对话（简体中文）。
-- 读取模拟温湿度传感器（数据带采样时间与新鲜度标记）。
-- 查询/控制模拟设备：灯（开关、亮度 1-100）、风扇（开关、档位 low/medium/high）。
-- **控制操作必须人工确认**；拒绝则不执行、状态不变（程序保证，不靠提示词）。
-- 操作后回读设备状态验证；状态未知或失败绝不报告成功。
-- 模拟设备状态持久化（`data/simulated_state.json`），重启不丢。
-- 模型服务异常自动重试；工具调用次数上限保护；全程结构化日志与 Token 用量记录。
-
-模型接入为 OpenAI 兼容适配层，默认 DeepSeek，可经 `.env` 换任何兼容厂商。
+- **文本 CLI**（`python -m butler`）：多轮对话、传感器查询、设备控制（确认制）。
+- **Web 界面**（`python -m butler.webapp`）：仪表盘+对话+页面批准确认+记忆管理+任务记录。
+- **语音模式**（`python -m butler.voice`，`--mic` 语音输入）：SAPI 离线播报 + 本地 whisper 识别。
+- **长期记忆**：用户确认后保存偏好/事实，随时查看/修改/删除/导出，立即影响决策。
+- **多步骤任务**：`/task 我准备睡觉了，关掉卧室灯并打开风扇低档` —— 计划先验证再执行，
+  逐步可追踪，出错即中止。
+- **主动提醒**：对话里说「温度超过 30 度提醒我」即可创建规则（连续命中+冷却防霸屏，
+  纯通知，绝不自动控制设备）。
+- **双设备后端**：`DEVICE_BACKEND=simulated`（默认，安全）或 `homeassistant`（真实设备，
+  白名单管控），Agent 层零改动切换。
 
 ## 快速开始
 
@@ -57,9 +62,10 @@ python -m butler
 ## 运行测试
 
 ```bash
-python -m pytest tests/            # 离线回归（41 项，不触网、零 API 成本）
+python -m pytest tests/            # 离线回归（91 项，不触网、零 API 成本）
 BUTLER_RUN_REAL_API_TESTS=1 python -m pytest tests/test_integration_real_api.py
                                    # 真实 API 集成测试（默认跳过）
+python -m butler.check_config      # 配置与环境自检
 ```
 
 ## 项目结构
@@ -67,27 +73,39 @@ BUTLER_RUN_REAL_API_TESTS=1 python -m pytest tests/test_integration_real_api.py
 ```
 butler/
 ├── cli.py            # 命令行交互（UTF-8 兼容 Windows GBK 终端）
+├── webapp.py         # Web 仪表盘与 API（确认队列/并发保护）
 ├── agent.py          # Agent 循环：LLM↔工具往返、上限保护、异常收敛
+├── planner.py        # 多步骤任务规划器（计划验证→顺序执行→中止语义）
+├── proactive.py      # 主动服务规则引擎（纯通知、确定性规则）
 ├── llm_client.py     # LLM 适配层（OpenAI 兼容，可换厂商）
 ├── conversation.py   # 对话上下文（按整轮裁剪）
-├── confirmation.py   # 确认接口（控制台 / 测试注入）
+├── confirmation.py   # 确认接口（控制台 / Web 队列 / 测试注入）
+├── check_config.py   # 配置与环境自检
 ├── config.py         # 配置加载与校验（fail-fast）
 ├── logging_setup.py  # 滚动文件日志
-├── devices/          # 设备抽象 + 模拟设备（传感器/灯/风扇）+ 注册表
-└── tools/            # 工具注册表、参数校验、安全执行器、家庭工具集
-tests/                # pytest：校验/设备/执行器/Agent/配置（离线）+ 真实 API 集成
-docs/                 # 需求/架构/选型/复用记录/路线图
+├── memory/           # SQLite 长期记忆、任务日志、规则与通知
+├── devices/          # 设备抽象 + 模拟设备 + Home Assistant 适配器 + 注册表
+├── emulator/         # HA REST API 本地模拟器（无 HA 也能联调适配器）
+├── voice/            # 语音桥接：SAPI TTS + faster-whisper ASR + 麦克风
+└── tools/            # 工具注册表、参数校验、安全执行器、家庭/记忆/规则工具集
+firmware/esphome/     # ESP32 固件配置（已通过校验并完成编译）
+scripts/              # HA 一键部署、备份脚本
+tests/                # 92 项测试：离线回归 + 真实 API 集成（默认跳过）
+docs/                 # 需求/架构/选型/复用/路线图/RUNBOOK/硬件/语音
 ```
 
 安全层执行顺序：注册检查 → JSON 解析 → Schema 校验 → 风险等级 → 用户确认 → 执行 →
 回读验证 → 审计日志。高风险操作（门锁/燃气/电热类）默认禁止，无注册工具。
 
-## 已知限制（阶段 1）
+## 已知限制
 
-- 设备为模拟实现，无真实硬件（阶段 2 接入 Home Assistant，阶段 3 接入 ESP32）。
-- 无长期记忆（阶段 5）；无多步骤任务规划（阶段 6）；无语音（阶段 8）。
+- 真实 Home Assistant 容器待部署：Docker Desktop 已装好，**需重启一次电脑完成 WSL2**，
+  然后管理员运行 `scripts\setup_homeassistant.ps1`（详见 docs/RUNBOOK.md 第 3 节）。
+- ESP32 待烧录：固件已编译完成，插线后 `esphome run firmware/esphome/esp32-butler.yaml`。
+- 语音输入的噪声环境表现未做真实调试；无唤醒词（演进方向 HA Voice，见 docs/VOICE.md）。
 - `CONFIRMATION_MODE=never` 仅供调试，会跳过所有确认并输出警告日志。
-- 模拟传感器读数为随机漂移，不代表真实环境。
+- Web 界面无登录鉴权，默认仅绑定 127.0.0.1，勿暴露公网。
+- 主动服务为纯通知级：设备自动化交给 HA 内置自动化承担（安全设计）。
 
 ## 安全提示
 
