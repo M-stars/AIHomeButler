@@ -1,6 +1,8 @@
 # 密钥与本地配置（绝不提交）
 .env
 config/ha_devices.json
+firmware/esphome/secrets.yaml
+.esphome/
 
 # Python
 __pycache__/

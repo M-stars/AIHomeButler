@@ -156,6 +156,8 @@ def build_home_tools(registry: DeviceRegistry) -> List[ToolSpec]:
             parameters={"type": "object", "properties": {}, "required": []},
             risk=RISK_LOW,
             handler=_list_devices,
+            timeout_seconds=10.0,
+            retryable=True,
         ),
         ToolSpec(
             name="get_device_state",
@@ -173,6 +175,8 @@ def build_home_tools(registry: DeviceRegistry) -> List[ToolSpec]:
             },
             risk=RISK_LOW,
             handler=_get_device_state,
+            timeout_seconds=10.0,
+            retryable=True,
         ),
         ToolSpec(
             name="get_sensor_readings",
@@ -180,6 +184,8 @@ def build_home_tools(registry: DeviceRegistry) -> List[ToolSpec]:
             parameters={"type": "object", "properties": {}, "required": []},
             risk=RISK_LOW,
             handler=_get_sensor_readings,
+            timeout_seconds=10.0,
+            retryable=True,
         ),
         ToolSpec(
             name="control_device",
@@ -208,6 +214,8 @@ def build_home_tools(registry: DeviceRegistry) -> List[ToolSpec]:
             },
             risk=RISK_MEDIUM,
             handler=_control_device,
+            timeout_seconds=15.0,
+            retryable=False,  # 控制操作非幂等，绝不自动重试
         ),
     ]
 
