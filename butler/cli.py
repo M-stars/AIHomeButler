@@ -8,7 +8,14 @@ import sys
 from datetime import datetime
 
 from .agent import Agent, build_system_prompt
-from .config import CONFIRMATION_ALWAYS, CONFIRMATION_NEVER, ButlerConfig, ConfigError, load_config
+from .config import (
+    BACKEND_HOMEASSISTANT,
+    CONFIRMATION_ALWAYS,
+    CONFIRMATION_NEVER,
+    ButlerConfig,
+    ConfigError,
+    load_config,
+)
 from .confirmation import ConsoleConfirmer
 from .conversation import Conversation
 from .devices.registry import DeviceRegistry
@@ -50,6 +57,15 @@ def _print_devices(registry: DeviceRegistry) -> None:
     for d in registry.list():
         availability = "在线" if d.is_available() else "离线"
         print(f"  {d.info.id}  {d.info.name}  [{d.info.area}]  {availability}")
+
+
+def _build_registry(config: ButlerConfig) -> DeviceRegistry:
+    """按配置选择设备后端：模拟（默认，安全）或 Home Assistant（真实设备）。"""
+    if config.device_backend == BACKEND_HOMEASSISTANT:
+        from .devices.homeassistant import build_ha_registry
+
+        return build_ha_registry(config)
+    return build_default_devices(config.data_dir)
 
 
 def _build_agent(config: ButlerConfig, registry: DeviceRegistry) -> Agent:
@@ -95,11 +111,17 @@ def main() -> int:
     if config.confirmation_mode == CONFIRMATION_NEVER:
         logger.warning("CONFIRMATION_MODE=never：控制类操作不再请求确认，仅限调试环境使用！")
 
-    registry = build_default_devices(config.data_dir)
+    registry = _build_registry(config)
     agent = _build_agent(config, registry)
 
+    backend_label = (
+        f"Home Assistant @ {config.ha_url}"
+        if config.device_backend == BACKEND_HOMEASSISTANT
+        else "模拟设备模式"
+    )
     print("=" * 56)
-    print("AI Home Butler 管家已就绪（阶段 1 · 模拟设备模式）")
+    print("AI Home Butler 管家已就绪")
+    print(f"设备后端: {backend_label}")
     print(f"模型: {config.model} @ {config.base_url}")
     print("确认模式: " + ("每次控制操作需确认" if config.confirmation_mode == CONFIRMATION_ALWAYS else "已关闭（仅限调试）"))
     print("设备清单:")

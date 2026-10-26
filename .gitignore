@@ -1,5 +1,6 @@
 # 密钥与本地配置（绝不提交）
 .env
+config/ha_devices.json
 
 # Python
 __pycache__/

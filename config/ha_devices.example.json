@@ -1,0 +1,10 @@
+{
+  "_说明": "Home Assistant 设备白名单：只有列在这里的实体才会暴露给 AI。复制为 config/ha_devices.json 后按家中实际实体修改。",
+  "devices": [
+    { "entity_id": "sensor.living_room_temp", "name": "客厅温度传感器", "type": "sensor", "area": "客厅" },
+    { "entity_id": "sensor.living_room_humidity", "name": "客厅湿度传感器", "type": "sensor", "area": "客厅" },
+    { "entity_id": "light.living_room", "name": "客厅灯", "type": "light", "area": "客厅" },
+    { "entity_id": "light.bedroom", "name": "卧室灯", "type": "light", "area": "卧室" },
+    { "entity_id": "fan.bedroom", "name": "卧室风扇", "type": "fan", "area": "卧室" }
+  ]
+}

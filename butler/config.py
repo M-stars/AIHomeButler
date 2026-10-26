@@ -21,6 +21,10 @@ CONFIRMATION_ALWAYS = "always"
 CONFIRMATION_NEVER = "never"
 _VALID_CONFIRMATION_MODES = (CONFIRMATION_ALWAYS, CONFIRMATION_NEVER)
 
+BACKEND_SIMULATED = "simulated"
+BACKEND_HOMEASSISTANT = "homeassistant"
+_VALID_BACKENDS = (BACKEND_SIMULATED, BACKEND_HOMEASSISTANT)
+
 
 class ConfigError(Exception):
     """配置缺失或非法，message 中包含修复指引。"""
@@ -36,6 +40,11 @@ class ButlerConfig:
     max_tool_calls_per_turn: int
     max_history_messages: int
     confirmation_mode: str
+    device_backend: str
+    ha_url: str
+    ha_token: str
+    ha_timeout_seconds: float
+    ha_devices_file: Path
     data_dir: Path
     log_dir: Path
     log_level: str
@@ -96,6 +105,23 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
     if log_level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError(f"配置 LOG_LEVEL 非法：{log_level!r}")
 
+    device_backend = os.environ.get("DEVICE_BACKEND", BACKEND_SIMULATED).strip().lower()
+    if device_backend not in _VALID_BACKENDS:
+        raise ConfigError(
+            f"配置 DEVICE_BACKEND 只能为 {'/'.join(_VALID_BACKENDS)}，当前值：{device_backend!r}"
+        )
+    ha_url = os.environ.get("HA_URL", "http://localhost:8123").strip()
+    ha_token = os.environ.get("HA_TOKEN", "").strip()
+    if device_backend == BACKEND_HOMEASSISTANT:
+        # fail-fast：切到真实平台前必须给齐凭证，绝不带默认值裸跑
+        if not ha_token:
+            raise ConfigError(
+                "DEVICE_BACKEND=homeassistant 时必须配置 HA_TOKEN"
+                "（HA 网页 → 用户资料 → 安全 → 长期访问令牌）"
+            )
+        if not ha_url.lower().startswith(("http://", "https://")):
+            raise ConfigError(f"配置 HA_URL 必须以 http(s):// 开头，当前值：{ha_url!r}")
+
     data_dir = PROJECT_ROOT / os.environ.get("DATA_DIR", "data").strip()
     return ButlerConfig(
         base_url=base_url,
@@ -106,6 +132,11 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         max_tool_calls_per_turn=_get_int("MAX_TOOL_CALLS_PER_TURN", 8),
         max_history_messages=_get_int("MAX_HISTORY_MESSAGES", 60, minimum=10),
         confirmation_mode=confirmation_mode,
+        device_backend=device_backend,
+        ha_url=ha_url,
+        ha_token=ha_token,
+        ha_timeout_seconds=_get_float("HA_TIMEOUT_SECONDS", 10.0),
+        ha_devices_file=PROJECT_ROOT / "config" / "ha_devices.json",
         data_dir=data_dir,
         log_dir=PROJECT_ROOT / "logs",
         log_level=log_level,
