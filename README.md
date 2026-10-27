@@ -101,7 +101,7 @@ butler/
 ├── emulator/         # HA REST API 本地模拟器（无 HA 也能联调适配器）
 ├── voice/            # 语音桥接：SAPI TTS + faster-whisper ASR + 麦克风
 └── tools/            # 工具注册表、参数校验、安全执行器、家庭/记忆/规则工具集
-firmware/esphome/     # ESP32 固件配置（已通过校验并完成编译）
+firmware/esphome/     # ESP32 固件配置（ESPHome 2026.10.1 与 2025.5.2 双版本校验通过）
 scripts/              # HA 一键部署、备份脚本
 tests/                # 92 项测试：离线回归 + 真实 API 集成（默认跳过）
 docs/                 # 需求/架构/选型/复用/路线图/RUNBOOK/硬件/语音
@@ -114,7 +114,8 @@ docs/                 # 需求/架构/选型/复用/路线图/RUNBOOK/硬件/语
 
 - 真实 Home Assistant 容器待部署：Docker Desktop 已装好，**需重启一次电脑完成 WSL2**，
   然后管理员运行 `scripts\setup_homeassistant.ps1`（详见 docs/RUNBOOK.md 第 3 节）。
-- ESP32 待烧录：固件已编译完成，插线后 `esphome run firmware/esphome/esp32-butler.yaml`。
+- ESP32 待烧录：固件已通过 ESPHome 2026.10.1 校验；此前编译产物（2025.5.2）基于旧实体名，
+  插线后 `esphome run firmware/esphome/esp32-butler.yaml` 会自动重新编译并烧录。
 - 语音输入的噪声环境表现未做真实调试；无唤醒词（演进方向 HA Voice，见 docs/VOICE.md）。
 - `CONFIRMATION_MODE=never` 仅供调试，会跳过所有确认并输出警告日志。
 - Web 界面无登录鉴权，默认仅绑定 127.0.0.1，勿暴露公网。

@@ -15,6 +15,10 @@
 # 校验：esphome config firmware/esphome/esp32-butler.yaml
 # 编译：esphome compile firmware/esphome/esp32-butler.yaml
 # 烧录：esphome run firmware/esphome/esp32-butler.yaml（COM 口见 docs/HARDWARE.md）
+#
+# 命名约束：实体 name 一律用 ASCII。新版 ESPHome 会把实体名转成 ASCII 实体 ID，
+# 纯中文名会变成相同的下划线串——长度相同的名字判重冲突，校验直接失败。
+# 管家侧显示的中文名来自 config/ha_devices.json 白名单，不依赖这里的名字。
 
 substitutions:
   friendly_name: "AI Home Butler 环境节点"
@@ -56,10 +60,10 @@ sensor:
     pin: GPIO4
     model: DHT22
     temperature:
-      name: "客厅温度"
+      name: "Living Room Temperature"
       id: living_room_temperature
     humidity:
-      name: "客厅湿度"
+      name: "Living Room Humidity"
       id: living_room_humidity
     update_interval: 30s
 
@@ -72,12 +76,12 @@ light:
   - platform: binary
     output: onboard_led_output
     id: test_light
-    name: "测试灯（板载LED）"
+    name: "Test Light"
 
 button:
   - platform: restart
-    name: "重启环境节点"
+    name: "Restart"
 
 text_sensor:
   - platform: version
-    name: "固件版本"
+    name: "Firmware Version"

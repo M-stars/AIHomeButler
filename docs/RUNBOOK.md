@@ -35,7 +35,8 @@ HA 的机器上以假乱真地调试适配器（`python -m butler.emulator --por
 
 ## 4. ESP32 烧录（阶段 3 收尾）
 
-见 docs/HARDWARE.md 第 4 节。固件已编译完成（`firmware/esphome/.esphome/build/`），
+见 docs/HARDWARE.md 第 4 节。固件已通过 ESPHome 2026.10.1 校验（2025.5.2 编译产物在
+`firmware/esphome/.esphome/build/`，实体名修正后 `esphome run` 会自动重新编译），
 插上开发板后 `esphome run firmware/esphome/esp32-butler.yaml` 选 COM 口即可。
 
 ## 5. 日志
