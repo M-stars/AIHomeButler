@@ -56,10 +56,10 @@ sensor:
     pin: GPIO4
     model: DHT22
     temperature:
-      name: "客厅温度"
+      name: "客厅温度 T"
       id: living_room_temperature
     humidity:
-      name: "客厅湿度"
+      name: "客厅湿度 H"
       id: living_room_humidity
     update_interval: 30s
 
