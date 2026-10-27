@@ -1,6 +1,7 @@
 """语音会话入口：python -m butler.voice
 
-语音输出默认启用（Windows SAPI5 离线合成）。
+语音输出默认启用（Windows SAPI5 离线合成）；配置 TTS_BACKEND=cosyvoice 时
+改用 CosyVoice 官方服务端合成（含音色库克隆音色），失败按配置降级回 SAPI。
 语音输入两种方式：
   1. 默认：键盘输入文字（纯语音输出模式，无需任何音频采集依赖）；
   2. --mic：麦克风采集 + faster-whisper 识别（需 pip install faster-whisper sounddevice）。
@@ -18,13 +19,24 @@ from ..cli import _build_agent, _build_registry, _deliver_notifications  # 复�
 from ..config import ConfigError, load_config
 from ..logging_setup import setup_logging
 from ..memory.store import MemoryStore
-from .tts import SapiSpeaker, SilentSpeaker, Speaker, Transcriber, VoiceError, WhisperTranscriber
+from .assembly import build_tts_stack
+from .tts import SilentSpeaker, Speaker, Transcriber, VoiceError, WhisperTranscriber
 
 
 def _build_transcriber(enabled: bool) -> Transcriber:
     if not enabled:
         return None
     return WhisperTranscriber()
+
+
+def _speak_safely(speaker: Speaker, text: str) -> None:
+    """播报失败绝不中断对话主流程：只打印错误并继续。"""
+    try:
+        speaker.speak(text)
+    except VoiceError as exc:
+        print(f"[语音输出失败] {exc}")
+    except Exception as exc:  # 播放器底层未知异常同样不冒泡
+        print(f"[语音输出失败] 未知错误：{exc}")
 
 
 def main() -> int:
@@ -42,11 +54,28 @@ def main() -> int:
     setup_logging(config.log_dir, config.log_level)
 
     speaker: Speaker
-    try:
-        speaker = SilentSpeaker() if args.no_speak else SapiSpeaker()
-    except VoiceError as exc:
-        print(f"[语音输出不可用] {exc}，切换为静音模式")
+    using_cosyvoice = False
+    if args.no_speak:
         speaker = SilentSpeaker()
+    else:
+        try:
+            from .profiles import VoiceProfileError
+
+            stack = build_tts_stack(config)
+            speaker = stack.speaker
+            using_cosyvoice = stack.backend == "cosyvoice"
+        except (VoiceError, VoiceProfileError) as exc:
+            print(f"[语音输出不可用] {exc}，切换为静音模式")
+            speaker = SilentSpeaker()
+        else:
+            if stack.backend == "cosyvoice":
+                default_voice = stack.profiles.default()
+                voice_name = default_voice["display_name"] if default_voice else "模型预设音色"
+                print(f"语音后端: CosyVoice（{config.cosyvoice_url}）默认音色: {voice_name}")
+                if stack.fallback_speaker is not None:
+                    print("CosyVoice 不可用时自动降级到 Windows SAPI（降级会打印提示）")
+            else:
+                print("语音后端: Windows SAPI5（如需 CosyVoice 克隆音色，在 .env 设置 TTS_BACKEND=cosyvoice）")
 
     transcriber = None
     try:
@@ -60,7 +89,12 @@ def main() -> int:
 
     print("=" * 56)
     print("AI Home Butler 语音模式（共用文本模式的安全与确认机制）")
-    print(f"语音输出: {'关闭' if args.no_speak else 'Windows SAPI5'}")
+    if args.no_speak:
+        print("语音输出: 关闭")
+    elif using_cosyvoice:
+        print("语音输出: CosyVoice（默认音色见上）")
+    else:
+        print("语音输出: Windows SAPI5")
     print("输入文字后回车；控制类操作仍会在终端请求 y/N 确认。/exit 退出")
     print("=" * 56)
 
@@ -71,8 +105,8 @@ def main() -> int:
         text = transcriber.transcribe_wav(Path(args.wav))
         print(f"识别结果: {text}")
         result = agent.process(text)
-        speaker.speak(result.reply)
         print(f"管家: {result.reply}")
+        _speak_safely(speaker, result.reply)
         return 0
 
     while True:
@@ -100,13 +134,13 @@ def main() -> int:
             print("\n管家: 再见！")
             return 0
         if line.strip().lower() in ("/exit", "/quit", "退出"):
-            speaker.speak("好的，再见")
+            _speak_safely(speaker, "好的，再见")
             return 0
         result = agent.process(line)
         for event in result.tool_events:
             print(f"  [工具] {event.tool}: {event.status}")
         print(f"管家: {result.reply}")
-        speaker.speak(result.reply)
+        _speak_safely(speaker, result.reply)
         _deliver_notifications(rule_engine)
 
 

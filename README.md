@@ -27,6 +27,10 @@
   连续命中+冷却防霸屏，纯通知，绝不自动控制设备）。
 - **双设备后端**：`DEVICE_BACKEND=simulated`（默认，安全）或 `homeassistant`（真实设备，
   白名单管控），Agent 层零改动切换。
+- **可选 CosyVoice 中文合成 + 音色库**（阶段 12）：`TTS_BACKEND=cosyvoice` 切换到
+  官方开源 CosyVoice（独立环境运行，主项目零新增依赖）；上传参考录音（需说话人
+  授权）即可克隆音色，管家用你的声音播报回复；服务故障按配置降级回 SAPI。
+  部署见 [docs/COSYVOICE_SETUP.md](docs/COSYVOICE_SETUP.md)。
 
 ## 快速开始
 

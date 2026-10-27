@@ -56,6 +56,39 @@
       <h2>主动提醒</h2>
       <div id="notiflist" class="small">加载中…</div>
     </div>
+    <div class="card">
+      <h2>语音设置（音色库）</h2>
+      <div id="voicestatus" class="small">加载中…</div>
+      <div class="small" style="margin:6px 0">
+        <label><input type="checkbox" id="speakreply"> 朗读管家回复（使用当前默认音色，AI 合成语音）</label>
+      </div>
+      <div id="voicelist" style="margin:8px 0"></div>
+      <div class="row" style="margin-bottom:6px">
+        <input type="text" id="voicetesttext" placeholder="试听文本（默认：你好，卧室现在的温度是二十五度。）" />
+      </div>
+      <div class="row" style="margin-bottom:6px">
+        <button id="voicepreset" class="ghost">添加官方示例音色</button>
+        <button id="voicecacheclear" class="ghost">清空生成缓存</button>
+      </div>
+      <div class="small" style="margin-bottom:4px"><b>新建音色</b>（克隆需要说话人明确授权；仅支持 wav/mp3/flac/ogg/m4a，≤10MB，建议 5~15 秒）</div>
+      <div class="row" style="margin-bottom:6px">
+        <input type="text" id="voicename" placeholder="音色名称，如：我的声音" />
+      </div>
+      <div class="row" style="margin-bottom:6px">
+        <input type="text" id="voicereftext" placeholder="参考录音中实际说出的文字" />
+      </div>
+      <div class="row" style="margin-bottom:6px">
+        <input type="file" id="voicefile" accept=".wav,.mp3,.flac,.ogg,.m4a" style="flex:1;color:var(--dim)" />
+      </div>
+      <div class="row">
+        <label class="small" style="display:flex;align-items:center;gap:4px">
+          <input type="checkbox" id="voiceconsent"> 我是该录音的说话人 / 已获得说话人明确授权
+        </label>
+        <button id="voiceadd">创建音色</button>
+      </div>
+      <div class="small warn" style="margin-top:6px">⚠ 所有合成语音均为 AI 生成，请勿用于冒充真人或欺骗他人。</div>
+      <div id="voicemsg" class="small"></div>
+    </div>
   </div>
   <div>
     <div class="card">
@@ -118,6 +151,12 @@ async function send() {
       (data.tool_events || []).forEach(e => addMsg("tool", `[工具] ${e.tool}: ${e.status} — ${e.message}`));
       (data.notifications || []).forEach(n => addMsg("tool", `[主动提醒] ${n.message}`));
       addMsg("butler", data.reply || "（无回复）");
+      if ($("speakreply").checked && data.reply) {
+        jfetchAudio("/api/tts", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({text: data.reply}),
+        }).then(playBlob).catch(err => addMsg("tool", "朗读失败：" + err.message));
+      }
     }
   } catch (err) {
     addMsg("tool", "请求失败：" + err.message);
@@ -226,10 +265,139 @@ async function refreshTasks() {
   } catch (e) { /* 忽略 */ }
 }
 
-function refresh() { refreshDevices(); refreshMemories(); refreshNotifications(); refreshTasks(); }
+// ---- 语音设置（音色库）----
+
+function voiceMsg(text, isErr) {
+  const box = $("voicemsg");
+  box.textContent = text || "";
+  box.className = "small " + (isErr ? "bad" : "ok");
+}
+
+async function jfetchAudio(url, options) {
+  const resp = await fetch(url, options);
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    throw new Error(data.detail || resp.statusText);
+  }
+  return await resp.blob();
+}
+
+function playBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  audio.play();
+  audio.onended = () => URL.revokeObjectURL(url);
+}
+
+async function refreshVoiceStatus() {
+  try {
+    const s = await jfetch("/api/voice/status");
+    const parts = [`TTS 后端 <b>${s.backend}</b>`];
+    parts.push(s.backend === "cosyvoice"
+      ? (s.cosyvoice_healthy ? '<span class="ok">CosyVoice 服务在线</span>' : '<span class="bad">CosyVoice 服务离线</span>')
+      : "Windows SAPI 离线合成");
+    if (s.default_voice) parts.push(`默认音色 <b>${s.default_voice.display_name}</b>`);
+    if (s.last_degradation) parts.push(`<span class="warn">⚠ 已降级到 ${s.last_degradation.to}（${s.last_degradation.reason}）</span>`);
+    $("voicestatus").innerHTML = parts.join(" ｜ ") + `<div class="small">${s.ai_disclaimer || ""}</div>`;
+  } catch (e) {
+    $("voicestatus").innerHTML = '<span class="bad">语音模块不可用：' + e.message + "</span>";
+  }
+}
+
+async function refreshVoices() {
+  try {
+    const data = await jfetch("/api/voices");
+    const box = $("voicelist");
+    box.innerHTML = "";
+    (data.voices || []).forEach(v => {
+      const row = document.createElement("div");
+      row.className = "memitem";
+      const consentBadge = v.consent_status === "granted"
+        ? '<span class="ok">已授权</span>' : '<span class="warn">未授权</span>';
+      const defaultBadge = v.is_default ? '<span class="ok">[默认]</span>' : "";
+      const active = data.active_voice_id === v.voice_id;
+      const span = document.createElement("span");
+      span.innerHTML = `<b>${v.display_name}</b> ${defaultBadge} ${consentBadge}
+        <div class="small">${active ? "当前合成使用中 ｜ " : ""}参考文本长度 ${v.reference_text.length} 字</div>`;
+      const btns = document.createElement("div");
+      btns.style.display = "flex"; btns.style.gap = "6px";
+      const mk = (label, cls, fn) => { const b = document.createElement("button"); b.textContent = label; b.className = cls; b.onclick = fn; return b; };
+      btns.append(
+        mk("试听", "ghost", () => testVoice(v)),
+        v.is_default ? document.createElement("span") : mk("设为默认", "ghost", async () => { await jfetch(`/api/voices/${v.voice_id}/default`, {method: "POST"}); refreshVoice(); voiceMsg(`已将「${v.display_name}」设为默认音色`); }),
+        v.consent_status === "granted"
+          ? mk("撤销授权", "ghost", async () => { await jfetch(`/api/voices/${v.voice_id}/consent`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({granted: false})}); refreshVoice(); })
+          : mk("确认授权", "ghost", async () => { await jfetch(`/api/voices/${v.voice_id}/consent`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({granted: true})}); refreshVoice(); }),
+        mk("删除", "danger", async () => {
+          if (!confirm(`删除音色「${v.display_name}」？将同时删除其参考录音与生成缓存，不可恢复。`)) return;
+          await jfetch("/api/voices/" + v.voice_id, {method: "DELETE"});
+          refreshVoice(); voiceMsg(`已删除音色「${v.display_name}」`);
+        })
+      );
+      row.append(span, btns);
+      box.appendChild(row);
+    });
+    if (!(data.voices || []).length) box.innerHTML = '<span class="small">音色库为空。可添加官方示例音色，或上传参考录音创建个人音色。</span>';
+  } catch (e) { /* 状态区已提示 */ }
+}
+
+async function testVoice(v) {
+  const text = $("voicetesttext").value.trim() || "你好，卧室现在的温度是二十五度。";
+  voiceMsg(`正在用「${v.display_name}」试听…`);
+  try {
+    const blob = await jfetchAudio(`/api/voices/${v.voice_id}/test`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text}),
+    });
+    playBlob(blob);
+    voiceMsg(`试听成功（${v.display_name}，AI 合成语音）`);
+  } catch (e) {
+    voiceMsg("试听失败：" + e.message, true);
+  }
+}
+
+async function createVoice() {
+  const name = $("voicename").value.trim();
+  const refText = $("voicereftext").value.trim();
+  const file = $("voicefile").files[0];
+  if (!name || !refText || !file) { voiceMsg("请填写音色名称、参考录音文本并选择录音文件", true); return; }
+  if (!$("voiceconsent").checked) { voiceMsg("克隆音色需要勾选授权确认（未授权的音色只能保存、不能合成）", true); return; }
+  const form = new FormData();
+  form.append("display_name", name);
+  form.append("reference_text", refText);
+  form.append("consent_granted", "true");
+  form.append("prompt_wav", file);
+  voiceMsg("正在创建音色…");
+  try {
+    const data = await jfetch("/api/voices", {method: "POST", body: form});
+    $("voicename").value = ""; $("voicereftext").value = ""; $("voicefile").value = ""; $("voiceconsent").checked = false;
+    refreshVoice();
+    voiceMsg(`音色「${data.voice.display_name}」已创建，可直接试听`);
+  } catch (e) {
+    voiceMsg("创建失败：" + e.message, true);
+  }
+}
+
+function refreshVoice() { refreshVoiceStatus(); refreshVoices(); }
+
+function refresh() { refreshDevices(); refreshMemories(); refreshNotifications(); refreshTasks(); refreshVoiceStatus(); }
 
 $("sendbtn").onclick = send;
 $("chatinput").addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+$("voiceadd").onclick = createVoice;
+$("voicepreset").onclick = async () => {
+  try {
+    await jfetch("/api/voices/preset", {method: "POST"});
+    refreshVoice();
+    voiceMsg("官方示例音色已加入音色库（可直接试听）");
+  } catch (e) { voiceMsg("添加失败：" + e.message, true); }
+};
+$("voicecacheclear").onclick = async () => {
+  try {
+    const data = await jfetch("/api/voice/cache/clear", {method: "POST"});
+    voiceMsg(`已清空 ${data.cleared} 个生成缓存文件`);
+  } catch (e) { voiceMsg("清空失败：" + e.message, true); }
+};
 $("memadd").onclick = async () => {
   const content = $("meminput").value.trim();
   if (!content) return;
@@ -240,6 +408,7 @@ $("memadd").onclick = async () => {
 };
 
 refresh();
+refreshVoices();
 pollConfirmations();
 setInterval(refresh, 8000);
 setInterval(pollConfirmations, 2000);

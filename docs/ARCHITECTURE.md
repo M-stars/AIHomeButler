@@ -1,6 +1,6 @@
 # AI Home Butler 架构文档（ARCHITECTURE）
 
-更新日期：2026-10-27 ｜ 状态：阶段 1 架构（含阶段 2/3 演进方向）
+更新日期：2026-10-28 ｜ 状态：阶段 1 架构（含阶段 2/3 演进方向；阶段 12 语音子系统见 §6）
 
 ## 1. 逻辑分层（长期目标）
 
@@ -98,3 +98,31 @@ ToolResult.status 明确区分：`ok / error / declined / unknown`。
 - **确认策略**：读=LOW 自动放行；控制=MEDIUM 必确认；HIGH（锁/燃气/电热）默认无注册工具、
   执行器层面直接拒绝——这是代码保证，而非提示词约定。
 - **Windows GBK 终端**：CLI 启动时对 stdout/stderr 做 UTF-8 reconfigure（带降级保护）。
+
+## 6. 语音子系统（阶段 12 增补）
+
+```
+交互层（voice CLI / Web 界面）
+      │ 只把"最终回复文本"交给语音层
+      ▼
+Speaker 抽象（butler/voice/tts.py）
+  ├─ SapiSpeaker        Windows SAPI5 离线合成（默认，历史行为不变）
+  ├─ CosyVoiceSpeaker   官方 CosyVoice 服务端合成（可选后端）
+  │     │ HTTP 127.0.0.1:9880（httpx，超时/文本长度/并发上限在客户端收敛）
+  │     ▼
+  │   官方推理代码 + 薄适配层（scripts/cosyvoice_server.py：官方 server 与
+│   CosyVoice3 前端不兼容，实测后按最薄原则重写路由，复用官方 AutoModel）
+  │     └─ 官方推理代码 + Fun-CosyVoice3-0.5B 模型（独立 Python 3.10 环境）
+  ├─ FallbackSpeaker    主后端故障按配置降级；降级留痕（last_degradation）
+  └─ AudioCache         生成音频 LRU 缓存（数据目录内，可按音色清除）
+VoiceProfileManager（butler/voice/profiles.py）
+  └─ 音色档案 CRUD + 参考录音管理（数据目录）+ 授权门禁
+     （consent_status != granted 的档案禁止克隆合成，合成层强制检查）
+```
+
+职责边界：ASR/Agent/TTS/音色管理/播放各自独立；TTS 不接触设备接口与
+Home Assistant，不绕过确认流程；语音层任何异常不得中断 Agent 主流程
+（voice CLI 的播报全部经 _speak_safely 收敛异常）。
+
+安全约束：参考录音与生成音频只存数据目录（.gitignore 覆盖）；Web 端点
+不暴露录音绝对路径；合成语音在界面上明确标注"AI 合成"。

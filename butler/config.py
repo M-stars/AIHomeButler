@@ -25,6 +25,10 @@ BACKEND_SIMULATED = "simulated"
 BACKEND_HOMEASSISTANT = "homeassistant"
 _VALID_BACKENDS = (BACKEND_SIMULATED, BACKEND_HOMEASSISTANT)
 
+TTS_BACKEND_SAPI = "sapi"
+TTS_BACKEND_COSYVOICE = "cosyvoice"
+_VALID_TTS_BACKENDS = (TTS_BACKEND_SAPI, TTS_BACKEND_COSYVOICE)
+
 
 class ConfigError(Exception):
     """配置缺失或非法，message 中包含修复指引。"""
@@ -65,6 +69,13 @@ class ButlerConfig:
     data_dir: Path
     log_dir: Path
     log_level: str
+    # 语音合成（阶段 12）：默认 sapi 保持历史行为不变
+    tts_backend: str
+    cosyvoice_url: str
+    cosyvoice_timeout_seconds: float
+    cosyvoice_fallback_sapi: bool
+    cosyvoice_sample_rate: int
+    cosyvoice_max_text_chars: int
 
     def model_profile(self, name: str) -> ModelProfile:
         """读取命名模型档案（.env 中 LLM_<NAME>_BASE_URL/MODEL/API_KEY/
@@ -160,6 +171,16 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
             raise ConfigError(f"配置 HA_URL 必须以 http(s):// 开头，当前值：{ha_url!r}")
 
     data_dir = PROJECT_ROOT / os.environ.get("DATA_DIR", "data").strip()
+
+    tts_backend = os.environ.get("TTS_BACKEND", TTS_BACKEND_SAPI).strip().lower()
+    if tts_backend not in _VALID_TTS_BACKENDS:
+        raise ConfigError(
+            f"配置 TTS_BACKEND 只能为 {'/'.join(_VALID_TTS_BACKENDS)}，当前值：{tts_backend!r}"
+        )
+    cosyvoice_url = os.environ.get("COSYVOICE_URL", "http://127.0.0.1:9880").strip()
+    if not cosyvoice_url.lower().startswith(("http://", "https://")):
+        raise ConfigError(f"配置 COSYVOICE_URL 忘认以 http(s):// 开头，当前值：{cosyvoice_url!r}")
+
     return ButlerConfig(
         base_url=base_url,
         api_key=api_key,
@@ -181,4 +202,14 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         data_dir=data_dir,
         log_dir=PROJECT_ROOT / "logs",
         log_level=log_level,
+        # 语音合成：CosyVoice 为可选后端，默认 sapi 保证原有行为不变
+        tts_backend=tts_backend,
+        cosyvoice_url=cosyvoice_url,
+        cosyvoice_timeout_seconds=_get_float("COSYVOICE_TIMEOUT_SECONDS", 120.0),
+        cosyvoice_fallback_sapi=os.environ.get("COSYVOICE_FALLBACK_SAPI", "1").strip().lower()
+        not in ("0", "false", "no", "off"),
+        # 官方服务端返回裸 PCM 流，无采样率元数据；Fun-CosyVoice3-0.5B 为 24000，
+        # 换模型时以模型目录 cosyvoice3.yaml 里的 sample_rate 为准
+        cosyvoice_sample_rate=_get_int("COSYVOICE_SAMPLE_RATE", 24000, minimum=8000),
+        cosyvoice_max_text_chars=_get_int("COSYVOICE_MAX_TEXT_CHARS", 500, minimum=1),
     )

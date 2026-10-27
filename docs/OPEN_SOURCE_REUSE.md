@@ -18,6 +18,8 @@
 | 9 | 语音识别（阶段 8 桥接，可选） | faster-whisper（CTranslate2 移植） | github.com/SYSTRAN/faster-whisper | MIT | 活跃 | pip 依赖（可选） | 否 |
 | 10 | 麦克风采集（可选） | sounddevice | python-sounddevice.readthedocs.io | MIT | 活跃 | pip 依赖（可选） | 否 |
 | 11 | ESP32 固件（阶段 3 采用） | ESPHome 2025.5.2（本机已安装并完成固件编译） | github.com/esphome/esphome | GPL-3.0 + 附加授权（NOASSERTION，已人工确认 LICENSE：作为工具使用、固件产物归配置作者，合规） | 活跃 | pip 安装的工具链 | 仅写 YAML 配置 |
+| 12 | 中文语音合成/音色克隆（阶段 12 采用） | CosyVoice 官方仓库 + 官方预训练模型 Fun-CosyVoice3-0.5B-2512 + 官方 FastAPI 服务端（runtime/python/fastapi/server.py 原样使用） | github.com/QwenAudio/CosyVoice ｜ modelscope.cn/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512 | 代码 Apache-2.0（LICENSE 文件）；**模型权重 Apache-2.0**（HF 模型页标注；ModelScope 页 License 字段为空，以 HF 为准） | 活跃（2026-10-28 仍在更新） | 独立 Python 3.10 环境（cosyvoice/.venv）运行官方代码，主项目仅 HTTP 调用；权重不入 Git | 仅加 127.0.0.1 启动器（scripts/cosyvoice_server.py），官方文件零修改 |
+| 13 | Web 表单上传（阶段 12） | python-multipart（FastAPI 官方指定的 multipart 解析库） | github.com/Kludex/python-multipart | Apache-2.0 | 活跃 | pip 依赖 | 否 |
 
 检索关键词（#1）：`DeepSeek API OpenAI SDK compatible base_url function calling`；
 核实方式：官方文档 api-docs.deepseek.com + 本机实测（tool_calls 与结果回传全链路通过）。
@@ -32,6 +34,9 @@
 | 4 | ESP-IDF / Arduino-ESP32 / PlatformIO | 官方 SDK 成熟（ESP-IDF 为 Apache-2.0，阶段 3 引入时再核实其余） | 仅当 ESPHome 无法满足定制需求时启用（阶段 3 决策点） |
 | 5 | Home Assistant 部署方式（Windows） | 官方建议 Windows 上以 HAOS 虚拟机运行；Docker Desktop 容器为轻量替代；WSL2 Supervised 为社区方案 | Docker 未安装 → 阶段 2 需先安装 Docker Desktop 或 VirtualBox；这是用户需完成的操作 |
 | 6 | LangChain / AutoGen / CrewAI 等 Agent 框架 | 能力覆盖工具编排，但抽象重、依赖面大 | 阶段 1 的"单 Agent + function calling + 自有执行器"即可满足且可控性/可测试性更好；待阶段 6 任务规划时重新评估 |
+| 7 | CosyVoice gRPC 服务端（runtime/python/grpc） | 官方提供 | 需额外编译 proto、占 50001 端口、二进制流需自行封装；官方 FastAPI 服务端（POST /inference_* 表单 + WAV 流）已满足需求（阶段 12 决策） |
+| 8 | CosyVoice WebUI（gradio） | 官方提供 | 交互式演示界面，不适合程序化调用；管家走官方 FastAPI 服务端 |
+| 9 | CosyVoice Docker 部署 | 官方提供 Dockerfile | 本机 Docker 守护进程未运行且 WSL2 缺失（GPU 直通依赖 WSL2）；不擅自安装系统组件，改用 uv 独立 venv 的 Windows 原生部署 |
 
 ## 3. 明确禁止的重复开发（对照检索结论）
 
