@@ -31,6 +31,22 @@ class ConfigError(Exception):
 
 
 @dataclass
+class ModelProfile:
+    """一个命名模型档案：main=对话主模型，planner=任务规划，其余名字自取。
+
+    支撑"一个主模型 + 若干次级模型"：每个消费者在装配时绑定自己的档案，
+    档案未定义的字段逐项回退全局 LLM_* 配置，换厂商/换模型只动 .env。
+    """
+
+    name: str
+    base_url: str
+    api_key: str
+    model: str
+    timeout_seconds: float
+    max_retries: int
+
+
+@dataclass
 class ButlerConfig:
     base_url: str
     api_key: str
@@ -49,6 +65,26 @@ class ButlerConfig:
     data_dir: Path
     log_dir: Path
     log_level: str
+
+    def model_profile(self, name: str) -> ModelProfile:
+        """读取命名模型档案（.env 中 LLM_<NAME>_BASE_URL/MODEL/API_KEY/
+        TIMEOUT_SECONDS/MAX_RETRIES），未定义的字段逐项回退全局 LLM_*。
+
+        例如 LLM_PLANNER_MODEL=xxx 即可让任务规划单独用一个模型，
+        不配置任何 LLM_<NAME>_* 变量时所有档案都等于全局配置（行为不变）。
+        """
+        key = name.strip().lower().replace("-", "_")
+        if not key or not key.replace("_", "").isalnum():
+            raise ConfigError(f"模型档案名非法：{name!r}（只允许字母、数字、下划线）")
+        prefix = f"LLM_{key.upper()}_"
+        return ModelProfile(
+            name=key,
+            base_url=os.environ.get(prefix + "BASE_URL", self.base_url).strip(),
+            api_key=os.environ.get(prefix + "API_KEY", self.api_key).strip(),
+            model=os.environ.get(prefix + "MODEL", self.model).strip(),
+            timeout_seconds=_get_float(prefix + "TIMEOUT_SECONDS", self.llm_timeout_seconds),
+            max_retries=_get_int(prefix + "MAX_RETRIES", self.llm_max_retries),
+        )
 
 
 def _require(key: str) -> str:

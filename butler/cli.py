@@ -19,7 +19,7 @@ from .config import (
 from .confirmation import ConsoleConfirmer
 from .conversation import Conversation
 from .devices.registry import DeviceRegistry
-from .llm_client import OpenAICompatClient
+from .llm_client import build_llm
 from .logging_setup import setup_logging
 from .memory.store import MemoryStore
 from .proactive import RuleEngine, build_proactive_tools
@@ -147,13 +147,7 @@ def _build_agent(
         confirmer,
         confirmation_enabled=(config.confirmation_mode == CONFIRMATION_ALWAYS),
     )
-    llm = OpenAICompatClient(
-        base_url=config.base_url,
-        api_key=config.api_key,
-        model=config.model,
-        timeout_seconds=config.llm_timeout_seconds,
-        max_retries=config.llm_max_retries,
-    )
+    llm = build_llm(config, "main")
 
     def system_prompt_provider() -> str:
         return build_system_prompt(

@@ -59,10 +59,23 @@ python -m butler
 
 命令：`/devices` 列出设备、`/help` 帮助、`/exit` 退出。
 
+### 多模型配置（可选）
+
+支持"一个主模型 + 若干次级模型"：每个角色一组 `LLM_<角色>_*` 变量
+（`BASE_URL` / `MODEL` / `API_KEY` / `TIMEOUT_SECONDS` / `MAX_RETRIES`），
+未定义的字段自动继承全局 `LLM_*` 配置。内置角色绑定：
+
+- `main` —— 对话主模型（Agent，完整工具集 function calling）
+- `planner` —— 多步任务规划（PlanRunner，独立汇报提示词）
+
+一个都不配置时所有角色共用全局模型，行为与单模型完全一致。
+换厂商/换模型只改 `.env`，不改代码；新增次级消费者时在装配处
+`build_llm(config, "<角色名>")` 绑定即可。
+
 ## 运行测试
 
 ```bash
-python -m pytest tests/            # 离线回归（91 项，不触网、零 API 成本）
+python -m pytest tests/            # 离线回归（不触网、零 API 成本）
 BUTLER_RUN_REAL_API_TESTS=1 python -m pytest tests/test_integration_real_api.py
                                    # 真实 API 集成测试（默认跳过）
 python -m butler.check_config      # 配置与环境自检
