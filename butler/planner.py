@@ -79,14 +79,23 @@ class PlanRunner:
 
     @classmethod
     def for_cli(
-        cls, config: ButlerConfig, registry: DeviceRegistry, memory_store: MemoryStore
+        cls,
+        config: ButlerConfig,
+        registry: DeviceRegistry,
+        memory_store: MemoryStore,
+        executor: Optional[ToolExecutor] = None,
     ) -> "PlanRunner":
+        """executor 传入时与调用方共用（共享确认器与防重放缓存）；
+        不传则使用独立的控制台确认执行器。"""
         tool_registry = ToolRegistry()
         for spec in build_home_tools(registry):
             tool_registry.register(spec)
         for spec in build_memory_tools(memory_store):
             tool_registry.register(spec)
-        executor = ToolExecutor(tool_registry, ConsoleConfirmer())
+        for spec in build_proactive_tools(memory_store, device_registry=registry):
+            tool_registry.register(spec)
+        if executor is None:
+            executor = ToolExecutor(tool_registry, ConsoleConfirmer())
         llm = OpenAICompatClient(
             base_url=config.base_url,
             api_key=config.api_key,

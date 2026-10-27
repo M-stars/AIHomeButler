@@ -138,7 +138,7 @@ def _build_agent(
         tool_registry.register(spec)
     for spec in build_memory_tools(memory_store):
         tool_registry.register(spec)
-    for spec in build_proactive_tools(memory_store):
+    for spec in build_proactive_tools(memory_store, device_registry=registry):
         tool_registry.register(spec)
 
     confirmer = confirmer or ConsoleConfirmer()
@@ -170,7 +170,7 @@ def _build_agent(
         system_prompt_provider=system_prompt_provider,
     )
     rule_engine = RuleEngine(registry, memory_store)
-    return agent, rule_engine
+    return agent, rule_engine, executor
 
 
 def main() -> int:
@@ -187,7 +187,7 @@ def main() -> int:
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
-    agent, rule_engine = _build_agent(config, registry, memory_store)
+    agent, rule_engine, _executor = _build_agent(config, registry, memory_store)
     _start_proactive_scheduler(config, rule_engine)
 
     backend_label = (

@@ -56,7 +56,7 @@ def main() -> int:
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
-    agent, rule_engine = _build_agent(config, registry, memory_store)
+    agent, rule_engine, _executor = _build_agent(config, registry, memory_store)
 
     print("=" * 56)
     print("AI Home Butler 语音模式（共用文本模式的安全与确认机制）")

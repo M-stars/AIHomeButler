@@ -53,8 +53,10 @@ class WebConfirmer:
         with self._lock:
             if item in self._pending:
                 self._pending.remove(item)
-        if not resolved:
-            item["approved"] = False  # 超时 = 拒绝（安全默认）
+        if not resolved and not item["event"].is_set():
+            # 超时且确实无人应答才按拒绝处理；若应答恰好落在超时临界点
+            # （wait 已返回但 respond 已写入结果），以写入结果为准（P2 竞态修复）
+            item["approved"] = False
         return bool(item["approved"])
 
     def pending(self) -> List[Dict[str, Any]]:
@@ -207,10 +209,8 @@ def create_app(
 
     @app.get("/api/notifications")
     def notifications():
-        try:
-            rule_engine.run_checks()
-        except Exception:
-            pass
+        # 通知由后台 RuleScheduler 落库；此处只读，
+        # 避免前端 8 秒轮询反复触发规则检查导致连击计数虚高
         return {"notifications": memory_store.list_notifications()}
 
     @app.get("/api/tasks")
@@ -228,11 +228,11 @@ def build_web_app(config) -> FastAPI:
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
     confirmer = WebConfirmer()
-    agent, rule_engine = _build_agent(config, registry, memory_store, confirmer=confirmer)
+    agent, rule_engine, executor = _build_agent(config, registry, memory_store, confirmer=confirmer)
 
-    planner = PlanRunner.for_cli(config, registry, memory_store)
-    # 计划器与 Web 对话共享同一个确认队列
-    planner._executor._confirmer = confirmer
+    # 规划器与 Web 对话共用同一执行器：确认队列一致，防重放缓存也一致
+    # （避免"对话刚开的灯"与"任务里的开灯"绕过彼此的重复执行保护）
+    planner = PlanRunner.for_cli(config, registry, memory_store, executor=executor)
 
     # 后台主动检查：不依赖前端轮询，通知落库后由页面定时刷新呈现
     scheduler = RuleScheduler(

@@ -206,6 +206,73 @@ def test_simulated_style_sensor_threshold_still_fires(mem):
     assert "temperature_c=32.0" in fired[0]["message"]
 
 
+def test_rule_for_missing_device_never_spams(mem):
+    """P1 回归：规则引用不存在的设备时，异常路径必须静默记日志，
+    不得每个检查周期发一条通知（后台调度器 60s 一轮会变成轰炸）。"""
+    sensor = StubSensor("sensor.stub", "测试传感器")
+    clock = FakeClock()
+    engine = _make_engine(mem, sensor, clock)
+    mem.add_rule(
+        name="幽灵设备离线", kind="device_offline",
+        params={"device_id": "sensor.ghost"}, cooldown_seconds=300,
+    )
+    for _ in range(5):
+        clock.advance(600)  # 远超冷却期
+        assert engine.run_checks() == []
+
+
+def test_create_threshold_rule_rejects_non_sensor_device(tmp_path, registry):
+    """P1 回归：不能给灯创建温度阈值规则——那是一条静默永不触发的哑弹规则。"""
+    from butler.memory.store import MemoryStore
+    from butler.proactive import build_proactive_tools
+    from butler.tools.base import ToolSpec  # noqa: F401
+
+    store = MemoryStore(tmp_path / "memory.db")
+    registry_tools = ToolRegistry()
+    for spec in build_proactive_tools(store, device_registry=registry):
+        registry_tools.register(spec)
+    executor = make_executor(registry_tools, AutoApproveConfirmer())
+
+    result = executor.execute(
+        "create_threshold_rule",
+        json.dumps({
+            "name": "灯的温度", "device_id": "light.living_room",
+            "metric": "temperature", "op": ">", "threshold": 30,
+        }),
+    )
+    assert result.status == "error"
+    assert "不是传感器" in result.message
+    assert store.list_rules() == []  # 拒绝创建
+
+
+def test_create_threshold_rule_rejects_missing_metric(tmp_path, registry):
+    """传感器存在但不提供该指标（如要 humidity 却只有温度）→ 拒绝。"""
+    from butler.memory.store import MemoryStore
+    from butler.proactive import build_proactive_tools
+
+    store = MemoryStore(tmp_path / "memory.db")
+    registry_tools = ToolRegistry()
+    for spec in build_proactive_tools(store, device_registry=registry):
+        registry_tools.register(spec)
+    executor = make_executor(registry_tools, AutoApproveConfirmer())
+
+    result = executor.execute(
+        "create_threshold_rule",
+        json.dumps({
+            "name": "客厅温度", "device_id": "sensor.living_room",
+            "metric": "temperature", "op": ">", "threshold": 30,
+        }),
+    )
+    assert result.status == "ok"  # 模拟传感器提供 temperature_c → 放行
+
+    result = executor.execute(
+        "create_offline_rule",
+        json.dumps({"name": "查无此灯", "device_id": "light.nowhere"}),
+    )
+    assert result.status == "error"
+    assert "不存在" in result.message
+
+
 def test_rule_tools_require_confirmation(tmp_path):
     store = MemoryStore(tmp_path / "memory.db")
     registry = ToolRegistry()
