@@ -157,6 +157,55 @@ def test_threshold_sensor_offline_resets_streak(mem):
     assert len(fired) == 1
 
 
+def test_ha_style_sensor_threshold_fires(mem):
+    """P0 回归：HA 后端 HaSensor 返回的键是 value（非 temperature_c），
+    metric="temperature" 的阈值规则必须照样触发，不得静默失效。"""
+    sensor = StubSensor("sensor.stub", "HA温度传感器")
+    clock = FakeClock()
+    engine = _make_engine(mem, sensor, clock)
+    mem.add_rule(
+        name="高温提醒", kind="sensor_threshold",
+        params={"device_id": "sensor.stub", "metric": "temperature", "op": ">", "threshold": 30.0},
+        cooldown_seconds=300,
+    )
+    sensor.value = 31.0  # StubSensor.read_state 返回 {"value": ...}，与 HaSensor 相同
+    assert engine.run_checks() == []  # 连击 1
+    fired = engine.run_checks()       # 连击 2 → 触发
+    assert len(fired) == 1
+    assert "value=31.0" in fired[0]["message"]
+    assert "°C" in fired[0]["message"]  # 单位来自 state["unit"]（HaSensor 提供）
+
+
+def test_simulated_style_sensor_threshold_still_fires(mem):
+    """P0 回归对照：模拟后端返回 temperature_c，metric="temperature" 同样命中。"""
+    from butler.devices.base import Device, DeviceInfo, TYPE_SENSOR
+
+    class SimStyleSensor(Device):
+        def __init__(self):
+            super().__init__(DeviceInfo("sensor.sim", "模拟传感器", TYPE_SENSOR, "客厅"))
+            self.temperature_c = 22.0
+
+        def is_available(self):
+            return True
+
+        def read_state(self):
+            return {"temperature_c": self.temperature_c, "humidity_percent": 50.0,
+                    "sampled_at": "2026-10-27T00:00:00+08:00", "fresh": True}
+
+    sensor = SimStyleSensor()
+    clock = FakeClock()
+    engine = _make_engine(mem, sensor, clock)
+    mem.add_rule(
+        name="高温提醒", kind="sensor_threshold",
+        params={"device_id": "sensor.sim", "metric": "temperature", "op": ">", "threshold": 30.0},
+    )
+    sensor.temperature_c = 32.0
+    engine.run_checks()
+    fired = engine.run_checks()
+    assert len(fired) == 1
+    assert "temperature_c=32.0" in fired[0]["message"]
+
+
 def test_rule_tools_require_confirmation(tmp_path):
     store = MemoryStore(tmp_path / "memory.db")
     registry = ToolRegistry()

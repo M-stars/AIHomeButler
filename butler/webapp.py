@@ -223,6 +223,7 @@ def create_app(
 def build_web_app(config) -> FastAPI:
     """运行时装配（CLI 复用同一套组件构造逻辑）。"""
     from .cli import _build_agent, _build_registry
+    from .scheduler import RuleScheduler
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
@@ -232,6 +233,15 @@ def build_web_app(config) -> FastAPI:
     planner = PlanRunner.for_cli(config, registry, memory_store)
     # 计划器与 Web 对话共享同一个确认队列
     planner._executor._confirmer = confirmer
+
+    # 后台主动检查：不依赖前端轮询，通知落库后由页面定时刷新呈现
+    scheduler = RuleScheduler(
+        rule_engine,
+        interval_seconds=config.proactive_check_interval_seconds,
+        sink=None,
+    )
+    scheduler.start()
+
     return create_app(
         config=config,
         registry=registry,

@@ -22,11 +22,15 @@ _log = logging.getLogger("butler.proactive")
 
 _DEFAULT_CONSECUTIVE = 2
 _DEFAULT_COOLDOWN_SECONDS = 300
-_METRICS = {
-    "temperature": "temperature_c",
-    "humidity": "humidity_percent",
-    "value": "value",
+# 每个逻辑指标对应多个候选状态键：模拟后端返回 temperature_c/humidity_percent，
+# HA 适配器（HaSensor）返回通用 value+unit。按序取第一个数值型命中，
+# 避免规则在某一后端下静默失效（P0 修复：原实现只认单一键名）。
+_METRIC_CANDIDATE_KEYS = {
+    "temperature": ("temperature_c", "value"),
+    "humidity": ("humidity_percent", "value"),
+    "value": ("value",),
 }
+_UNIT_FALLBACKS = {"temperature_c": "°C", "humidity_percent": "%"}
 _OPERATORS = {
     ">": lambda a, b: a > b,
     "<": lambda a, b: a < b,
@@ -87,22 +91,30 @@ class RuleEngine:
     def _eval_threshold(self, rule: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         params = rule["params"]
         device_id = params.get("device_id")
-        metric = _METRICS.get(params.get("metric"))
+        candidate_keys = _METRIC_CANDIDATE_KEYS.get(params.get("metric"), ())
         op = _OPERATORS.get(params.get("op"))
         threshold = params.get("threshold")
-        if not device_id or metric is None or op is None or not isinstance(threshold, (int, float)):
+        if not device_id or not candidate_keys or op is None or not isinstance(threshold, (int, float)):
             self._log.warning("规则 %s 参数不完整，跳过", rule["id"])
             return None
 
         device = self._devices.get(device_id)
         state = device.read_state()  # 离线抛 DeviceOffline → 由 run_checks 统一处理
-        value = state.get(metric)
-        if not isinstance(value, (int, float)):
+        value = None
+        matched_key = None
+        for key in candidate_keys:
+            candidate = state.get(key)
+            if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+                value = float(candidate)
+                matched_key = key
+                break
+        if value is None:
+            # 后端没给出任何可用的数值（数据缺失≠数据超标），连击清零
             self._streaks[rule["id"]] = 0
             return None
 
         required = int(params.get("consecutive", _DEFAULT_CONSECUTIVE))
-        if op(float(value), float(threshold)):
+        if op(value, float(threshold)):
             self._streaks[rule["id"]] = self._streaks.get(rule["id"], 0) + 1
         else:
             self._streaks[rule["id"]] = 0
@@ -113,10 +125,10 @@ class RuleEngine:
         if not self._cooldown_ok(rule):
             return None
 
-        unit = state.get("unit") or {"temperature_c": "°C", "humidity_percent": "%"}.get(metric, "")
+        unit = state.get("unit") or _UNIT_FALLBACKS.get(matched_key, "")
         return self._fire(
             rule,
-            f"【{rule['name']}】{device.info.name} 当前 {metric}={value}{unit}，"
+            f"【{rule['name']}】{device.info.name} 当前 {matched_key}={value}{unit}，"
             f"已连续 {self._streaks[rule['id']]} 次满足条件（{params.get('op')} {threshold}）",
             level=params.get("level", "info"),
         )

@@ -23,6 +23,7 @@ from .llm_client import OpenAICompatClient
 from .logging_setup import setup_logging
 from .memory.store import MemoryStore
 from .proactive import RuleEngine, build_proactive_tools
+from .scheduler import RuleScheduler
 from .tools.executor import ToolExecutor
 from .tools.home import build_default_devices, build_home_tools
 from .tools.memory_tools import build_memory_tools
@@ -81,7 +82,7 @@ def _print_step(step: dict) -> None:
 
 
 def _deliver_notifications(rule_engine: RuleEngine) -> None:
-    """每轮对话后检查主动规则，把新通知呈现给用户。"""
+    """对话轮次结束后的即时检查（与后台调度器互补，冷却机制防重复）。"""
     try:
         fired = rule_engine.run_checks()
     except Exception:
@@ -89,6 +90,22 @@ def _deliver_notifications(rule_engine: RuleEngine) -> None:
         return
     for notification in fired:
         print(f"  [🔔 主动提醒] {notification['message']}")
+
+
+def _console_notification_sink(notification: dict) -> None:
+    """后台调度器的通知出口：随时打印（用户输入中的行会被打断，重打提示符）。"""
+    print(f"\n  [🔔 主动提醒] {notification['message']}")
+    print("你: ", end="", flush=True)
+
+
+def _start_proactive_scheduler(config: ButlerConfig, rule_engine: RuleEngine) -> RuleScheduler:
+    scheduler = RuleScheduler(
+        rule_engine,
+        interval_seconds=config.proactive_check_interval_seconds,
+        sink=_console_notification_sink,
+    )
+    scheduler.start()
+    return scheduler
 
 
 def _run_task(config: ButlerConfig, registry: DeviceRegistry, memory_store: MemoryStore, user_text: str) -> None:
@@ -171,6 +188,7 @@ def main() -> int:
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
     agent, rule_engine = _build_agent(config, registry, memory_store)
+    _start_proactive_scheduler(config, rule_engine)
 
     backend_label = (
         f"Home Assistant @ {config.ha_url}"
