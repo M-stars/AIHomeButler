@@ -1,4 +1,5 @@
 """HA 适配器集成测试：在进程内启动 HA API 模拟器，走真实 HTTP 链路验证。"""
+import httpx
 import json
 import socket
 import threading
@@ -140,14 +141,50 @@ def test_bad_token_maps_to_api_error(emulator_url):
         thread.join(timeout=5)
 
 
-def test_platform_down_read_is_offline():
-    dead = HassClient(base_url="http://127.0.0.1:1", token="t", timeout_seconds=2.0)
+def _transport_always_fails(exc: Exception):
+    """让 httpx 传输层必然抛出给定异常，模拟平台宕机。
+
+    不用真实的死端口（如 127.0.0.1:1）：在装有 WSL2/Hyper-V 的 Windows 或
+    网络沙箱里，"连不上的端口"行为不确定（可能被接受后挂起、甚至收到
+    系统组件的 HTTP 错误响应），曾导致本组测试偶发失败。被测对象是
+    适配器的错误映射逻辑，注入传输层异常即可完全确定。
+    """
+
+    def _fake_request(*args, **kwargs):
+        raise exc
+
+    return _fake_request
+
+
+def test_platform_down_read_is_offline(monkeypatch):
+    monkeypatch.setattr(
+        "butler.devices.homeassistant.httpx.request",
+        _transport_always_fails(httpx.ConnectError("[Errno 111] Connection refused")),
+    )
+    dead = HassClient(base_url="http://127.0.0.1:9", token="t", timeout_seconds=2.0)
     with pytest.raises(DeviceOffline):
         dead.get_state("light.x")
 
 
-def test_platform_down_control_is_state_unknown():
-    dead = HassClient(base_url="http://127.0.0.1:1", token="t", timeout_seconds=2.0)
+def test_platform_down_control_is_state_unknown(monkeypatch):
+    monkeypatch.setattr(
+        "butler.devices.homeassistant.httpx.request",
+        _transport_always_fails(httpx.ConnectTimeout("timed out")),
+    )
+    dead = HassClient(base_url="http://127.0.0.1:9", token="t", timeout_seconds=2.0)
+    with pytest.raises(StateUnknownError):
+        dead.call_service("light", "turn_on", "light.x")
+
+
+def test_transport_disconnect_maps_like_connect_failure(monkeypatch):
+    """对端中断（如 HA 重启中的半关闭）同属传输层失败：读=离线，控制=结果不明。"""
+    exc = httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+    monkeypatch.setattr(
+        "butler.devices.homeassistant.httpx.request", _transport_always_fails(exc)
+    )
+    dead = HassClient(base_url="http://127.0.0.1:9", token="t", timeout_seconds=2.0)
+    with pytest.raises(DeviceOffline):
+        dead.get_state("light.x")
     with pytest.raises(StateUnknownError):
         dead.call_service("light", "turn_on", "light.x")
 
