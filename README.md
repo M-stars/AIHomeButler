@@ -3,9 +3,9 @@
 在成熟开源智能家居基础设施之上构建的 AI 家庭管家：具备环境理解、记忆、任务规划、
 安全执行与主动服务能力。**不重复造 Home Assistant，不重写语音引擎。**
 
-当前状态：**阶段 0-11 首轮全部完成** —— 文本/网页/语音三种交互，模拟与 Home Assistant
-双设备后端，长期记忆，多步骤任务规划，主动提醒，语音播报；真实 HA 容器与 ESP32 烧录
-各差一步用户操作（见 docs/ROADMAP.md「近期待办」）。
+许可证：[MIT](LICENSE) ｜ 当前状态：**阶段 0-11 首轮全部完成** —— 文本/网页/语音三种交互，
+模拟与 Home Assistant 双设备后端，长期记忆，多步骤任务规划，主动提醒，语音播报；
+真实 HA 容器与 ESP32 烧录各差一步用户操作（见 docs/ROADMAP.md「近期待办」）。
 
 - 需求与验收：[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)
 - 架构设计：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
