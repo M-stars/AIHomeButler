@@ -23,6 +23,7 @@ from .confirmation import ConsoleConfirmer
 from .devices.registry import DeviceRegistry
 from .llm_client import LLMClient, LLMError, OpenAICompatClient
 from .memory.store import MemoryStore
+from .proactive import build_proactive_tools
 from .tools.executor import ToolExecutor
 from .tools.home import build_home_tools
 from .tools.memory_tools import build_memory_tools
