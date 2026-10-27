@@ -170,11 +170,13 @@ def test_memory_api_crud(web):
     assert client.delete(f"/api/memories/{created['id']}").status_code == 404
 
 
-def test_notifications_endpoint_runs_rule_checks(web, registry):
+def test_notifications_endpoint_lists_stored_notifications(web, registry):
+    """通知由后台调度器落库；端点只读（避免轮询反复触发检查）。"""
     web["memory"].add_rule(
         name="离线提醒", kind="device_offline", params={"device_id": "light.living_room"}
     )
     registry.get("light.living_room").set_unavailable(True)
+    web["memory"].add_notification(1, "离线提醒", "设备 客厅灯（light.living_room）处于离线状态", "warning")
     client = TestClient(web["app"])
     data = client.get("/api/notifications").json()
     assert any("离线" in n["message"] for n in data["notifications"])

@@ -45,6 +45,7 @@ class ButlerConfig:
     ha_token: str
     ha_timeout_seconds: float
     ha_devices_file: Path
+    proactive_check_interval_seconds: float
     data_dir: Path
     log_dir: Path
     log_level: str
@@ -137,6 +138,10 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         ha_token=ha_token,
         ha_timeout_seconds=_get_float("HA_TIMEOUT_SECONDS", 10.0),
         ha_devices_file=PROJECT_ROOT / "config" / "ha_devices.json",
+        # 主动服务后台检查间隔（下限 10s：更激进的间隔只会空转，冷却机制才是防轰炸的关键）
+        proactive_check_interval_seconds=max(
+            10.0, _get_float("PROACTIVE_CHECK_INTERVAL_SECONDS", 60.0)
+        ),
         data_dir=data_dir,
         log_dir=PROJECT_ROOT / "logs",
         log_level=log_level,

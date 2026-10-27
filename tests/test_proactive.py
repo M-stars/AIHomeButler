@@ -157,6 +157,122 @@ def test_threshold_sensor_offline_resets_streak(mem):
     assert len(fired) == 1
 
 
+def test_ha_style_sensor_threshold_fires(mem):
+    """P0 回归：HA 后端 HaSensor 返回的键是 value（非 temperature_c），
+    metric="temperature" 的阈值规则必须照样触发，不得静默失效。"""
+    sensor = StubSensor("sensor.stub", "HA温度传感器")
+    clock = FakeClock()
+    engine = _make_engine(mem, sensor, clock)
+    mem.add_rule(
+        name="高温提醒", kind="sensor_threshold",
+        params={"device_id": "sensor.stub", "metric": "temperature", "op": ">", "threshold": 30.0},
+        cooldown_seconds=300,
+    )
+    sensor.value = 31.0  # StubSensor.read_state 返回 {"value": ...}，与 HaSensor 相同
+    assert engine.run_checks() == []  # 连击 1
+    fired = engine.run_checks()       # 连击 2 → 触发
+    assert len(fired) == 1
+    assert "value=31.0" in fired[0]["message"]
+    assert "°C" in fired[0]["message"]  # 单位来自 state["unit"]（HaSensor 提供）
+
+
+def test_simulated_style_sensor_threshold_still_fires(mem):
+    """P0 回归对照：模拟后端返回 temperature_c，metric="temperature" 同样命中。"""
+    from butler.devices.base import Device, DeviceInfo, TYPE_SENSOR
+
+    class SimStyleSensor(Device):
+        def __init__(self):
+            super().__init__(DeviceInfo("sensor.sim", "模拟传感器", TYPE_SENSOR, "客厅"))
+            self.temperature_c = 22.0
+
+        def is_available(self):
+            return True
+
+        def read_state(self):
+            return {"temperature_c": self.temperature_c, "humidity_percent": 50.0,
+                    "sampled_at": "2026-10-27T00:00:00+08:00", "fresh": True}
+
+    sensor = SimStyleSensor()
+    clock = FakeClock()
+    engine = _make_engine(mem, sensor, clock)
+    mem.add_rule(
+        name="高温提醒", kind="sensor_threshold",
+        params={"device_id": "sensor.sim", "metric": "temperature", "op": ">", "threshold": 30.0},
+    )
+    sensor.temperature_c = 32.0
+    engine.run_checks()
+    fired = engine.run_checks()
+    assert len(fired) == 1
+    assert "temperature_c=32.0" in fired[0]["message"]
+
+
+def test_rule_for_missing_device_never_spams(mem):
+    """P1 回归：规则引用不存在的设备时，异常路径必须静默记日志，
+    不得每个检查周期发一条通知（后台调度器 60s 一轮会变成轰炸）。"""
+    sensor = StubSensor("sensor.stub", "测试传感器")
+    clock = FakeClock()
+    engine = _make_engine(mem, sensor, clock)
+    mem.add_rule(
+        name="幽灵设备离线", kind="device_offline",
+        params={"device_id": "sensor.ghost"}, cooldown_seconds=300,
+    )
+    for _ in range(5):
+        clock.advance(600)  # 远超冷却期
+        assert engine.run_checks() == []
+
+
+def test_create_threshold_rule_rejects_non_sensor_device(tmp_path, registry):
+    """P1 回归：不能给灯创建温度阈值规则——那是一条静默永不触发的哑弹规则。"""
+    from butler.memory.store import MemoryStore
+    from butler.proactive import build_proactive_tools
+    from butler.tools.base import ToolSpec  # noqa: F401
+
+    store = MemoryStore(tmp_path / "memory.db")
+    registry_tools = ToolRegistry()
+    for spec in build_proactive_tools(store, device_registry=registry):
+        registry_tools.register(spec)
+    executor = make_executor(registry_tools, AutoApproveConfirmer())
+
+    result = executor.execute(
+        "create_threshold_rule",
+        json.dumps({
+            "name": "灯的温度", "device_id": "light.living_room",
+            "metric": "temperature", "op": ">", "threshold": 30,
+        }),
+    )
+    assert result.status == "error"
+    assert "不是传感器" in result.message
+    assert store.list_rules() == []  # 拒绝创建
+
+
+def test_create_threshold_rule_rejects_missing_metric(tmp_path, registry):
+    """传感器存在但不提供该指标（如要 humidity 却只有温度）→ 拒绝。"""
+    from butler.memory.store import MemoryStore
+    from butler.proactive import build_proactive_tools
+
+    store = MemoryStore(tmp_path / "memory.db")
+    registry_tools = ToolRegistry()
+    for spec in build_proactive_tools(store, device_registry=registry):
+        registry_tools.register(spec)
+    executor = make_executor(registry_tools, AutoApproveConfirmer())
+
+    result = executor.execute(
+        "create_threshold_rule",
+        json.dumps({
+            "name": "客厅温度", "device_id": "sensor.living_room",
+            "metric": "temperature", "op": ">", "threshold": 30,
+        }),
+    )
+    assert result.status == "ok"  # 模拟传感器提供 temperature_c → 放行
+
+    result = executor.execute(
+        "create_offline_rule",
+        json.dumps({"name": "查无此灯", "device_id": "light.nowhere"}),
+    )
+    assert result.status == "error"
+    assert "不存在" in result.message
+
+
 def test_rule_tools_require_confirmation(tmp_path):
     store = MemoryStore(tmp_path / "memory.db")
     registry = ToolRegistry()
