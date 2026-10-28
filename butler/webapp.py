@@ -33,6 +33,7 @@ from .proactive import RuleEngine
 from .tools.executor import ToolExecutor
 from .voice.cosyvoice_client import CosyVoiceClientError
 from .voice.profiles import VoiceProfileError
+from .voice.speakers import SpeakerError
 from .voice.tts import VoiceError
 
 _WEB_DIR = Path(__file__).parent / "web"
@@ -115,7 +116,7 @@ class ConsentRequest(BaseModel):
 
 def _voice_http_error(exc: Exception) -> HTTPException:
     """把语音层异常映射为 HTTP 状态码与用户可读信息。"""
-    if isinstance(exc, VoiceProfileError):
+    if isinstance(exc, (VoiceProfileError, SpeakerError)):
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, CosyVoiceClientError):
         status = {
@@ -140,6 +141,7 @@ def create_app(
     confirmer: WebConfirmer,
     planner: Optional[PlanRunner] = None,
     voice_stack=None,
+    speaker_identity=None,
 ) -> FastAPI:
     app = FastAPI(title="AI Home Butler", docs_url=None, redoc_url=None)
     state: Dict[str, Any] = {
@@ -392,6 +394,73 @@ def create_app(
             raise _voice_http_error(exc)
         return Response(content=wav, media_type="audio/wav")
 
+    # ---- 家庭成员声纹（阶段 13；未装配时 503，向量永不出服务端/数据目录）----
+
+    def _require_speaker_identity():
+        if speaker_identity is None:
+            raise HTTPException(status_code=503, detail="声纹模块未装配")
+        return speaker_identity
+
+    @app.get("/api/speakers")
+    def speakers_status():
+        identity = _require_speaker_identity()
+        body = identity.status()
+        body["service_healthy"] = voice_stack.client.health_check(timeout_seconds=2.0)
+        return body
+
+    @app.post("/api/speakers")
+    async def enroll_speaker(
+        display_name: str = Form(),
+        consent_granted: bool = Form(),
+        voice_id: str = Form(default=""),
+        wav: UploadFile = File(),
+    ):
+        identity = _require_speaker_identity()
+        try:
+            data = await wav.read()
+            # 原始录音只在内存中过一遍：提取向量后即丢弃，不做落盘留存
+            embedding = voice_stack.client.speaker_embedding(
+                data, filename=Path(wav.filename or "clip.wav").name
+            )
+            profile = identity.registry.enroll(
+                display_name,
+                embedding,
+                consent_granted=consent_granted,
+                voice_id=voice_id or None,
+            )
+        except (SpeakerError, CosyVoiceClientError) as exc:
+            raise _voice_http_error(exc)
+        return {"speaker": profile, "created": True}
+
+    @app.post("/api/speakers/{member_id}/voice")
+    def bind_speaker_voice(member_id: str, voice_id: str = Form(default="")):
+        identity = _require_speaker_identity()
+        try:
+            profile = identity.registry.update_voice(member_id, voice_id or None)
+        except SpeakerError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"speaker": profile}
+
+    @app.post("/api/speakers/{member_id}/name")
+    def rename_speaker(member_id: str, display_name: str = Form()):
+        identity = _require_speaker_identity()
+        try:
+            profile = identity.registry.update_name(member_id, display_name)
+        except SpeakerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"speaker": profile}
+
+    @app.delete("/api/speakers/{member_id}")
+    def delete_speaker(member_id: str):
+        identity = _require_speaker_identity()
+        try:
+            removed = identity.registry.delete(member_id)
+        except SpeakerError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        if (speaker_identity.context.get() or {}).get("member_id") == member_id:
+            speaker_identity.context.clear()
+        return {"deleted": True, "speaker": removed}
+
     @app.post("/api/voice/cache/clear")
     def clear_voice_cache():
         stack = _require_voice_stack()
@@ -405,19 +474,21 @@ def build_web_app(config) -> FastAPI:
     """运行时装配（CLI 复用同一套组件构造逻辑）。"""
     from .cli import _build_agent, _build_registry
     from .scheduler import RuleScheduler
-    from .voice.assembly import build_tts_stack
+    from .voice.assembly import build_speaker_identity, build_tts_stack
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
     confirmer = WebConfirmer()
-    agent, rule_engine, executor = _build_agent(config, registry, memory_store, confirmer=confirmer)
+    voice_stack = build_tts_stack(config)
+    speaker_identity = build_speaker_identity(config, voice_stack.client)
+    agent, rule_engine, executor = _build_agent(
+        config, registry, memory_store, confirmer=confirmer,
+        member_context=speaker_identity.context,
+    )
 
     # 规划器与 Web 对话共用同一执行器：确认队列一致，防重放缓存也一致
     # （避免"对话刚开的灯"与"任务里的开灯"绕过彼此的重复执行保护）
     planner = PlanRunner.for_cli(config, registry, memory_store, executor=executor)
-
-    # 语音栈：按 TTS_BACKEND 装配（默认 sapi，行为不变；装配不联网，失败只影响合成）
-    voice_stack = build_tts_stack(config)
 
     # 后台主动检查：不依赖前端轮询，通知落库后由页面定时刷新呈现
     scheduler = RuleScheduler(
@@ -436,6 +507,7 @@ def build_web_app(config) -> FastAPI:
         confirmer=confirmer,
         planner=planner,
         voice_stack=voice_stack,
+        speaker_identity=speaker_identity,
     )
 
 

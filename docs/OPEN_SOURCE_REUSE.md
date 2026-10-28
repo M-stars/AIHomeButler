@@ -18,7 +18,7 @@
 | 9 | 语音识别（阶段 8 桥接，可选） | faster-whisper（CTranslate2 移植） | github.com/SYSTRAN/faster-whisper | MIT | 活跃 | pip 依赖（可选） | 否 |
 | 10 | 麦克风采集（可选） | sounddevice | python-sounddevice.readthedocs.io | MIT | 活跃 | pip 依赖（可选） | 否 |
 | 11 | ESP32 固件（阶段 3 采用） | ESPHome 2025.5.2（本机已安装并完成固件编译） | github.com/esphome/esphome | GPL-3.0 + 附加授权（NOASSERTION，已人工确认 LICENSE：作为工具使用、固件产物归配置作者，合规） | 活跃 | pip 安装的工具链 | 仅写 YAML 配置 |
-| 12 | 中文语音合成/音色克隆（阶段 12 采用） | CosyVoice 官方仓库 + 官方预训练模型 Fun-CosyVoice3-0.5B-2512 + 官方 FastAPI 服务端（runtime/python/fastapi/server.py 原样使用） | github.com/QwenAudio/CosyVoice ｜ modelscope.cn/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512 | 代码 Apache-2.0（LICENSE 文件）；**模型权重 Apache-2.0**（HF 模型页标注；ModelScope 页 License 字段为空，以 HF 为准） | 活跃（2026-10-28 仍在更新） | 独立 Python 3.10 环境（cosyvoice/.venv）运行官方代码，主项目仅 HTTP 调用；权重不入 Git | 仅加 127.0.0.1 启动器（scripts/cosyvoice_server.py），官方文件零修改 |
+| 12 | 中文语音合成/音色克隆（阶段 12 采用） | CosyVoice 官方仓库 + 官方预训练模型 Fun-CosyVoice3-0.5B-2512 + 官方 FastAPI 服务端（runtime/python/fastapi/server.py 原样使用） | github.com/QwenAudio/CosyVoice ｜ modelscope.cn/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512 | 代码 Apache-2.0（LICENSE 文件）；**模型权重 Apache-2.0**（HF 模型页标注；ModelScope 页 License 字段为空，以 HF 为准） | 活跃（2026-10-28 仍在更新） | 独立 Python 3.10 环境（cosyvoice/.venv）运行官方代码，主项目仅 HTTP 调用；权重不入 Git | 仅加 127.0.0.1 启动器与 /speaker_embed 声纹端点（scripts/cosyvoice_server.py），官方文件零修改；阶段 13 声纹识别复用其 campplus 模型与前端提取逻辑 |
 | 13 | Web 表单上传（阶段 12） | python-multipart（FastAPI 官方指定的 multipart 解析库） | github.com/Kludex/python-multipart | Apache-2.0 | 活跃 | pip 依赖 | 否 |
 
 检索关键词（#1）：`DeepSeek API OpenAI SDK compatible base_url function calling`；

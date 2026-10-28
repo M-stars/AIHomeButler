@@ -89,6 +89,31 @@
       <div class="small warn" style="margin-top:6px">⚠ 所有合成语音均为 AI 生成，请勿用于冒充真人或欺骗他人。</div>
       <div id="voicemsg" class="small"></div>
     </div>
+    <div class="card">
+      <h2>家庭成员声纹</h2>
+      <div id="speakerstatus" class="small">加载中…</div>
+      <div id="speakerlist" style="margin:8px 0"></div>
+      <div class="small" style="margin-bottom:4px"><b>注册成员</b>（用 5~15 秒该成员的清晰朗读录音；录音仅用于提取声纹向量，提取后即丢弃，向量只存本机）</div>
+      <div class="row" style="margin-bottom:6px">
+        <input type="text" id="speakername" placeholder="成员称呼，如：爸爸 / 妈妈 / 小明" />
+      </div>
+      <div class="row" style="margin-bottom:6px">
+        <select id="spkvoice" style="flex:1;background:#0d1220;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:9px 12px">
+          <option value="">回答音色：默认（可在创建后修改）</option>
+        </select>
+      </div>
+      <div class="row" style="margin-bottom:6px">
+        <input type="file" id="speakerfile" accept=".wav,.mp3,.flac,.ogg,.m4a" style="flex:1;color:var(--dim)" />
+      </div>
+      <div class="row">
+        <label class="small" style="display:flex;align-items:center;gap:4px;flex:1">
+          <input type="checkbox" id="speakerconsent"> 该成员本人/监护人已同意采集声纹
+        </label>
+        <button id="speakeradd">注册成员</button>
+      </div>
+      <div class="small" style="margin-top:6px">识别只用于个性化（称呼/记忆/音色），<b>不作为身份验证</b>；设备操作确认流程不受影响。</div>
+      <div id="speakermsg" class="small"></div>
+    </div>
   </div>
   <div>
     <div class="card">
@@ -380,7 +405,92 @@ async function createVoice() {
 
 function refreshVoice() { refreshVoiceStatus(); refreshVoices(); }
 
-function refresh() { refreshDevices(); refreshMemories(); refreshNotifications(); refreshTasks(); refreshVoiceStatus(); }
+// ---- 家庭成员声纹 ----
+
+function speakerMsg(text, isErr) {
+  const box = $("speakermsg");
+  box.textContent = text || "";
+  box.className = "small " + (isErr ? "bad" : "ok");
+}
+
+async function refreshSpeakers() {
+  try {
+    const data = await jfetch("/api/speakers");
+    const parts = [];
+    parts.push(data.speaker_recognition
+      ? `<span class="ok">识别已开启</span>（阈值 ${data.threshold.toFixed(2)}，${data.member_count} 位成员）`
+      : '<span class="warn">识别未开启</span>（.env 设 SPEAKER_RECOGNITION=1）');
+    parts.push(data.service_healthy ? '<span class="ok">声纹服务在线</span>' : '<span class="bad">声纹服务离线（需启动 CosyVoice 服务）</span>');
+    $("speakerstatus").innerHTML = parts.join(" ｜ ") + `<div class="small">${data.ai_disclaimer || ""}</div>`;
+
+    // 音色下拉框（绑定成员偏好的回答音色）
+    const voiceSel = $("spkvoice");
+    const voicesData = await jfetch("/api/voices").catch(() => ({voices: []}));
+    const current = voiceSel.value;
+    voiceSel.innerHTML = '<option value="">回答音色：默认（可在创建后修改）</option>' +
+      (voicesData.voices || []).map(v => `<option value="${v.voice_id}">${v.display_name}</option>`).join("");
+    if (current) voiceSel.value = current;
+
+    const box = $("speakerlist");
+    box.innerHTML = "";
+    (data.members || []).forEach(m => {
+      const row = document.createElement("div");
+      row.className = "memitem";
+      const span = document.createElement("span");
+      span.innerHTML = `<b>${m.display_name}</b>
+        <div class="small">识别 ${m.hits.count} 次${m.hits.last_at ? "｜最近 " + m.hits.last_at.slice(5, 16) : ""}｜音色 ${m.voice_id ? "已绑定" : "默认"}</div>`;
+      const btns = document.createElement("div");
+      btns.style.display = "flex"; btns.style.gap = "6px";
+      const mk = (label, cls, fn) => { const b = document.createElement("button"); b.textContent = label; b.className = cls; b.onclick = fn; return b; };
+      btns.append(
+        mk("换绑音色", "ghost", async () => {
+          const vid = prompt("输入要绑定的音色 ID（留空恢复默认，音色 ID 见下方音色库）：", m.voice_id || "");
+          if (vid === null) return;
+          const form = new FormData();
+          form.append("voice_id", vid);
+          await jfetch(`/api/speakers/${m.member_id}/voice`, {method: "POST", body: form});
+          refreshSpeakers();
+        }),
+        mk("删除", "danger", async () => {
+          if (!confirm(`删除成员「${m.display_name}」的声纹档案？不可恢复。`)) return;
+          await jfetch("/api/speakers/" + m.member_id, {method: "DELETE"});
+          refreshSpeakers();
+          speakerMsg(`已删除成员「${m.display_name}」`);
+        })
+      );
+      row.append(span, btns);
+      box.appendChild(row);
+    });
+    if (!(data.members || []).length) box.innerHTML = '<span class="small">尚无成员。注册后，语音模式会自动识别谁在说话并个性化回答。</span>';
+  } catch (e) {
+    $("speakerstatus").innerHTML = '<span class="bad">声纹模块不可用：' + e.message + "</span>";
+  }
+}
+
+async function createSpeaker() {
+  const name = $("speakername").value.trim();
+  const file = $("speakerfile").files[0];
+  if (!name || !file) { speakerMsg("请填写成员称呼并选择录音文件", true); return; }
+  if (!$("speakerconsent").checked) { speakerMsg("采集声纹必须先勾选成员本人/监护人授权", true); return; }
+  const form = new FormData();
+  form.append("display_name", name);
+  form.append("consent_granted", "true");
+  form.append("voice_id", $("spkvoice").value || "");
+  form.append("wav", file);
+  speakerMsg("正在提取声纹…");
+  try {
+    const data = await jfetch("/api/speakers", {method: "POST", body: form});
+    $("speakername").value = ""; $("speakerfile").value = ""; $("speakerconsent").checked = false;
+    refreshSpeakers();
+    speakerMsg(`成员「${data.speaker.display_name}」注册成功，语音模式对 TA 说话即可识别`);
+  } catch (e) {
+    speakerMsg("注册失败：" + e.message, true);
+  }
+}
+
+$("speakeradd").onclick = createSpeaker;
+
+function refresh() { refreshDevices(); refreshMemories(); refreshNotifications(); refreshTasks(); refreshVoiceStatus(); refreshSpeakers(); }
 
 $("sendbtn").onclick = send;
 $("chatinput").addEventListener("keydown", e => { if (e.key === "Enter") send(); });
@@ -409,6 +519,7 @@ $("memadd").onclick = async () => {
 
 refresh();
 refreshVoices();
+refreshSpeakers();
 pollConfirmations();
 setInterval(refresh, 8000);
 setInterval(pollConfirmations, 2000);

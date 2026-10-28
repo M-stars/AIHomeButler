@@ -108,6 +108,33 @@ def main() -> int:
         model_output = cosyvoice.inference_zero_shot(tts_text, prompt_text, temp_path)
         return StreamingResponse(generate_data(model_output, temp_path))
 
+    @app.post("/speaker_embed")
+    async def speaker_embed(wav: UploadFile = File()):
+        """声纹向量提取（阶段 13 家庭成员识别）。
+
+        复用官方前端已加载的 campplus 模型：音频重采样 16k → kaldi fbank
+        → 192 维嵌入。返回 JSON {"embedding": [...], "dim": N}。
+        注册用原始音频由调用方在拿到向量后自行丢弃（最小化生物特征留存）。
+        """
+        suffix = Path(wav.filename or "clip.wav").suffix or ".wav"
+        fd, temp_path = tempfile.mkstemp(suffix=suffix, prefix="cosyvoice_spk_")
+        os.close(fd)
+        try:
+            with open(temp_path, "wb") as out:
+                out.write(await wav.read())
+            # _extract_spk_embedding 接收文件路径（内部自行 load_wav 重采样 16k），
+            # 返回 (1, 192) 张量——展平成 Python 列表再返回
+            embedding = cosyvoice.frontend._extract_spk_embedding(temp_path)
+            if hasattr(embedding, "flatten"):
+                embedding = embedding.flatten().tolist()
+            embedding = [float(v) for v in embedding]
+            return {"embedding": embedding, "dim": len(embedding)}
+        finally:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
     @app.get("/inference_cross_lingual")
     @app.post("/inference_cross_lingual")
     async def inference_cross_lingual(tts_text: str = Form(),

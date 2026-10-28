@@ -12,13 +12,16 @@ cosyvoice 而服务未启动，不影响系统启动，只影响实际合成时�
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from ..config import ButlerConfig
-from .cosyvoice_client import DEFAULT_PROMPT_PREFIX, CosyVoiceClient
+from .cosyvoice_client import DEFAULT_PROMPT_PREFIX, CosyVoiceClient, CosyVoiceClientError
 from .profiles import VoiceProfileManager
+from .speakers import MemberContext, SpeakerRegistry
 from .tts import (
     AudioCache,
     CosyVoiceSpeaker,
@@ -26,9 +29,11 @@ from .tts import (
     SapiSpeaker,
     SilentSpeaker,
     Speaker,
+    VoiceError,
 )
 
 TTS_TAG = "cosyvoice"  # 缓存键里的后端标识
+_assembly_log = logging.getLogger("butler.voice.assembly")
 
 
 @dataclass
@@ -103,5 +108,63 @@ def build_tts_stack(config: ButlerConfig) -> TTSStack:
         client=client,
         cosyvoice_speaker=cosyvoice_speaker,
         cache=cache,
-        fallback_speaker=None if config.tts_backend != "cosyvoice" else fallback,
+        fallback_speaker=fallback,
     )
+
+
+@dataclass
+class SpeakerIdentity:
+    """声纹识别子系统（阶段 13）：注册表 + 当前说话人上下文。"""
+
+    registry: SpeakerRegistry
+    context: MemberContext
+    enabled: bool
+    threshold: float
+
+    def status(self) -> dict:
+        members = self.registry.list()
+        return {
+            "speaker_recognition": self.enabled,
+            "threshold": self.threshold,
+            "member_count": len(members),
+            "members": members,
+            "ai_disclaimer": "声纹识别仅用于个性化体验，不作为身份验证；"
+                             "声纹向量只存本机，识别失败自动按陌生人处理",
+        }
+
+
+def build_speaker_identity(config: ButlerConfig, client: CosyVoiceClient) -> SpeakerIdentity:
+    """装配声纹子系统：默认关闭（SPEAKER_RECOGNITION=0）时零行为变化。"""
+    return SpeakerIdentity(
+        registry=SpeakerRegistry(config.data_dir / "speakers"),
+        context=MemberContext(),
+        enabled=bool(config.speaker_recognition),
+        threshold=config.speaker_threshold,
+    )
+
+
+def identify_from_wav(
+    identity: SpeakerIdentity,
+    client: CosyVoiceClient,
+    wav_path,
+) -> tuple:
+    """对一段录音做声纹识别，返回 (成员|None, 相似度|None)。
+
+    任何失败（服务离线/格式问题/未开启）都收敛为 (None, None)，绝不打断
+    对话主流程；失败原因写入日志。命中时写入该成员的识别记录。
+    """
+    if not identity.enabled:
+        return None, None
+    try:
+        embedding = client.speaker_embedding(Path(wav_path).read_bytes(),
+                                             filename=Path(wav_path).name)
+        member, similarity = identity.registry.identify(embedding, identity.threshold)
+        if member is not None:
+            identity.registry.record_hit(member["member_id"], similarity)
+        return member, similarity
+    except CosyVoiceClientError as exc:
+        _assembly_log.warning("声纹识别失败（不影响对话）：%s", exc)
+        return None, None
+    except Exception as exc:  # 识别是锦上添花，任何异常都不打断对话
+        _assembly_log.warning("声纹识别异常（不影响对话）：%s", exc)
+        return None, None

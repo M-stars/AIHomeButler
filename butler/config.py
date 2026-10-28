@@ -76,6 +76,9 @@ class ButlerConfig:
     cosyvoice_fallback_sapi: bool
     cosyvoice_sample_rate: int
     cosyvoice_max_text_chars: int
+    # 家庭成员声纹识别（阶段 13）：默认关闭，行为不变
+    speaker_recognition: bool
+    speaker_threshold: float
 
     def model_profile(self, name: str) -> ModelProfile:
         """读取命名模型档案（.env 中 LLM_<NAME>_BASE_URL/MODEL/API_KEY/
@@ -212,4 +215,10 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         # 换模型时以模型目录 cosyvoice3.yaml 里的 sample_rate 为准
         cosyvoice_sample_rate=_get_int("COSYVOICE_SAMPLE_RATE", 24000, minimum=8000),
         cosyvoice_max_text_chars=_get_int("COSYVOICE_MAX_TEXT_CHARS", 500, minimum=1),
+        # 声纹识别：默认关闭；开启后语音模式在录音后自动识别家庭成员
+        speaker_recognition=os.environ.get("SPEAKER_RECOGNITION", "0").strip().lower()
+        in ("1", "true", "yes", "on"),
+        speaker_threshold=min(
+            0.95, max(0.05, _get_float("SPEAKER_THRESHOLD", 0.30))
+        ),
     )

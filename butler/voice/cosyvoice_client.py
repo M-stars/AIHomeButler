@@ -106,6 +106,50 @@ class CosyVoiceClient:
         except httpx.HTTPError:
             return False
 
+    # ---- 声纹提取（阶段 13：复用服务端 campplus 模型，不做任何本地音频算法）----
+
+    def speaker_embedding(self, wav_bytes: bytes, filename: str = "clip.wav") -> list:
+        """提取一段音频的声纹向量（192 维 float 列表）。
+
+        服务端 /speaker_embed 由适配层提供（官方 server 无此路由）：把音频
+        重采样到 16k 后过 campplus 模型。调用方随后应丢弃原始音频字节。
+        """
+        if not wav_bytes:
+            raise CosyVoiceClientError("要提取声纹的音频为空", "bad_request")
+        if not self._slots.acquire(timeout=self._timeout.read):
+            raise CosyVoiceClientError("已有语音任务在执行，请稍后再试", "busy")
+        try:
+            try:
+                resp = self._client.post(
+                    f"{self._base_url}/speaker_embed",
+                    files={"wav": (filename, wav_bytes)},
+                )
+            except httpx.TimeoutException as exc:
+                raise CosyVoiceClientError("声纹提取超时，请重试", "timeout") from exc
+            except httpx.HTTPError as exc:
+                raise CosyVoiceClientError(
+                    f"无法连接 CosyVoice 服务（{self._base_url}）：{exc.__class__.__name__}。"
+                    "声纹提取需要服务在线（见 docs/COSYVOICE_SETUP.md）",
+                    "unavailable",
+                ) from exc
+            if resp.status_code != 200:
+                detail = (resp.text or "").strip().splitlines()
+                snippet = detail[-1][:200] if detail else ""
+                kind = "bad_request" if resp.status_code in (400, 422) else "server_error"
+                raise CosyVoiceClientError(
+                    f"声纹提取失败（HTTP {resp.status_code}）：{snippet}", kind
+                )
+            try:
+                payload = resp.json()
+                embedding = list(payload["embedding"])
+            except (ValueError, KeyError, TypeError) as exc:
+                raise CosyVoiceClientError(
+                    "声纹服务返回格式异常", "server_error"
+                ) from exc
+            return embedding
+        finally:
+            self._slots.release()
+
     # ---- 合成 ----
 
     def synthesize(

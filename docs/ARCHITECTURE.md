@@ -118,6 +118,11 @@ Speaker 抽象（butler/voice/tts.py）
 VoiceProfileManager（butler/voice/profiles.py）
   └─ 音色档案 CRUD + 参考录音管理（数据目录）+ 授权门禁
      （consent_status != granted 的档案禁止克隆合成，合成层强制检查）
+SpeakerRegistry + MemberContext（butler/voice/speakers.py，阶段 13）
+  └─ 家庭成员声纹：注册/余弦比对/阈值与陌生人回落 + 当前说话人占位；
+     向量提取走服务端 /speaker_embed（复用 campplus），录音提取后即丢弃；
+     成员身份驱动：称呼个性化、按人隔离的记忆（shared_only 语义）、
+     成员绑定的回答音色。声纹不作身份验证，确认流程不放松。
 ```
 
 职责边界：ASR/Agent/TTS/音色管理/播放各自独立；TTS 不接触设备接口与
