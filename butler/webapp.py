@@ -5,19 +5,24 @@
     对话请求阻塞等待用户在页面上批准/拒绝（超时按拒绝处理），绝不静默放行；
   - 同一时刻只允许一个对话/任务在执行（防止并发操作同一设备与上下文错乱）；
   - API 无需登录仅限本机使用（默认绑定 127.0.0.1）；文档说明不要暴露到公网。
+
+阶段 12 扩展：音色库管理 API（/api/voices*）与语音合成 API（/api/voice*）。
+语音栈为可选装配（voice_stack=None 时这些端点返回 503），不影响原有功能。
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from .devices.base import DeviceError
@@ -26,6 +31,10 @@ from .memory.store import MemoryStore
 from .planner import PlanRunner
 from .proactive import RuleEngine
 from .tools.executor import ToolExecutor
+from .voice.cosyvoice_client import CosyVoiceClientError
+from .voice.profiles import VoiceProfileError
+from .voice.speakers import SpeakerError
+from .voice.tts import VoiceError
 
 _WEB_DIR = Path(__file__).parent / "web"
 
@@ -93,6 +102,35 @@ class MemoryCreateRequest(BaseModel):
     content: str
 
 
+class VoiceTestRequest(BaseModel):
+    text: str
+
+
+class TTSRequest(BaseModel):
+    text: str
+
+
+class ConsentRequest(BaseModel):
+    granted: bool
+
+
+def _voice_http_error(exc: Exception) -> HTTPException:
+    """把语音层异常映射为 HTTP 状态码与用户可读信息。"""
+    if isinstance(exc, (VoiceProfileError, SpeakerError)):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, CosyVoiceClientError):
+        status = {
+            "timeout": 504,
+            "unavailable": 503,
+            "busy": 429,
+            "bad_request": 400,
+        }.get(exc.kind, 502)
+        return HTTPException(status_code=status, detail=str(exc))
+    if isinstance(exc, VoiceError):
+        return HTTPException(status_code=503, detail=str(exc))
+    return HTTPException(status_code=500, detail=f"语音服务内部错误：{exc}")
+
+
 def create_app(
     *,
     config,
@@ -102,11 +140,14 @@ def create_app(
     rule_engine: RuleEngine,
     confirmer: WebConfirmer,
     planner: Optional[PlanRunner] = None,
+    voice_stack=None,
+    speaker_identity=None,
 ) -> FastAPI:
     app = FastAPI(title="AI Home Butler", docs_url=None, redoc_url=None)
     state: Dict[str, Any] = {
         "agent_lock": threading.Lock(),
         "task_lock": threading.Lock(),
+        "tts_lock": threading.Lock(),
     }
 
     def _device_views() -> List[Dict[str, Any]]:
@@ -138,6 +179,8 @@ def create_app(
             "model": config.model,
             "backend": config.device_backend,
             "confirmation_mode": config.confirmation_mode,
+            # 旧配置桩可能没有该字段：语音后端仅作展示用，缺省按 sapi 呈现
+            "tts_backend": getattr(config, "tts_backend", "sapi"),
         }
 
     @app.post("/api/chat")
@@ -217,6 +260,213 @@ def create_app(
     def tasks():
         return {"tasks": memory_store.list_task_logs()}
 
+    # ---- 语音：状态 / 音色库 / 合成（阶段 12，voice_stack 未装配时全部 503）----
+
+    def _require_voice_stack():
+        if voice_stack is None:
+            raise HTTPException(status_code=503, detail="语音模块未装配")
+        return voice_stack
+
+    @app.get("/api/voice/status")
+    def voice_status():
+        stack = _require_voice_stack()
+        try:
+            return stack.status()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"语音状态获取失败：{exc}")
+
+    @app.get("/api/voices")
+    def list_voices():
+        stack = _require_voice_stack()
+        voices = stack.profiles.list()
+        # 对外不暴露本地绝对路径：只返回受管相对路径文件名
+        for v in voices:
+            v.pop("_audio_file", None)
+        return {"voices": voices, "active_voice_id": stack.cosyvoice_speaker.voice_id}
+
+    @app.post("/api/voices")
+    async def create_voice(
+        display_name: str = Form(),
+        reference_text: str = Form(),
+        consent_granted: bool = Form(default=False),
+        prompt_wav: UploadFile = File(),
+    ):
+        stack = _require_voice_stack()
+        try:
+            data = await prompt_wav.read()
+            profile = stack.profiles.create(
+                display_name,
+                reference_text,
+                data,
+                Path(prompt_wav.filename or "").suffix,
+                consent_granted=consent_granted,
+            )
+        except VoiceProfileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"voice": profile, "created": True}
+
+    @app.post("/api/voices/preset")
+    def create_preset_voice():
+        """把官方示例音频登记为预设音色（consent 视为已授予：官方公开示例）。"""
+        stack = _require_voice_stack()
+        asset_dir = Path(os.environ.get(
+            "COSYVOICE_ASSET_DIR",
+            Path(__file__).resolve().parent.parent / "cosyvoice" / "CosyVoice" / "asset",
+        ))
+        audio = asset_dir / "zero_shot_prompt.wav"
+        try:
+            profile = stack.profiles.create(
+                "官方示例音色",
+                "希望你以后能够做的比我还好呦。",
+                b"",
+                ".wav",
+                model_id="preset",
+                consent_granted=True,
+                source_path=audio,
+            )
+        except VoiceProfileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"voice": profile, "created": True}
+
+    @app.post("/api/voices/{voice_id}/default")
+    def set_default_voice(voice_id: str):
+        stack = _require_voice_stack()
+        try:
+            profile = stack.profiles.set_default(voice_id)
+            stack.cosyvoice_speaker.set_voice(voice_id)  # 立即生效到合成层
+        except VoiceProfileError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"voice": profile, "is_default": True}
+
+    @app.post("/api/voices/{voice_id}/consent")
+    def set_voice_consent(voice_id: str, payload: ConsentRequest):
+        stack = _require_voice_stack()
+        try:
+            profile = stack.profiles.update_consent(voice_id, payload.granted)
+        except VoiceProfileError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"voice": profile}
+
+    @app.delete("/api/voices/{voice_id}")
+    def delete_voice(voice_id: str):
+        stack = _require_voice_stack()
+        try:
+            removed = stack.profiles.delete(voice_id)
+        except VoiceProfileError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        if stack.cosyvoice_speaker.voice_id == voice_id:
+            stack.cosyvoice_speaker.set_voice(None)  # 回退到模型预设音色
+        # 删除音色时一并清除其生成缓存（隐私默认：档案删除则生成物随之清除）
+        stack.cache.purge_voice(voice_id)
+        return {"deleted": True, "voice": removed}
+
+    @app.post("/api/voices/{voice_id}/test")
+    def test_voice(voice_id: str, payload: VoiceTestRequest):
+        """用指定音色试听一段文本，返回 WAV 音频（audio/wav）。"""
+        stack = _require_voice_stack()
+        try:
+            profile = stack.profiles.resolve_for_synthesis(voice_id)
+            wav = stack.client.synthesize(payload.text, profile)
+        except (VoiceProfileError, CosyVoiceClientError) as exc:
+            raise _voice_http_error(exc)
+        return Response(content=wav, media_type="audio/wav")
+
+    @app.post("/api/tts")
+    def tts(payload: TTSRequest):
+        """按当前配置的后端把文本合成为 WAV（用于朗读管家回复/自定义文本）。"""
+        stack = _require_voice_stack()
+        text = payload.text.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="内容不能为空")
+        try:
+            with state["tts_lock"]:
+                if stack.backend == "cosyvoice":
+                    wav = stack.cosyvoice_speaker.synthesize_bytes(text)
+                else:
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                        tmp = Path(tf.name)
+                    try:
+                        stack.speaker.speak_to_file(text, tmp)
+                        wav = tmp.read_bytes()
+                    finally:
+                        tmp.unlink(missing_ok=True)
+        except (VoiceProfileError, CosyVoiceClientError, VoiceError) as exc:
+            raise _voice_http_error(exc)
+        return Response(content=wav, media_type="audio/wav")
+
+    # ---- 家庭成员声纹（阶段 13；未装配时 503，向量永不出服务端/数据目录）----
+
+    def _require_speaker_identity():
+        if speaker_identity is None:
+            raise HTTPException(status_code=503, detail="声纹模块未装配")
+        return speaker_identity
+
+    @app.get("/api/speakers")
+    def speakers_status():
+        identity = _require_speaker_identity()
+        body = identity.status()
+        body["service_healthy"] = voice_stack.client.health_check(timeout_seconds=2.0)
+        return body
+
+    @app.post("/api/speakers")
+    async def enroll_speaker(
+        display_name: str = Form(),
+        consent_granted: bool = Form(),
+        voice_id: str = Form(default=""),
+        wav: UploadFile = File(),
+    ):
+        identity = _require_speaker_identity()
+        try:
+            data = await wav.read()
+            # 原始录音只在内存中过一遍：提取向量后即丢弃，不做落盘留存
+            embedding = voice_stack.client.speaker_embedding(
+                data, filename=Path(wav.filename or "clip.wav").name
+            )
+            profile = identity.registry.enroll(
+                display_name,
+                embedding,
+                consent_granted=consent_granted,
+                voice_id=voice_id or None,
+            )
+        except (SpeakerError, CosyVoiceClientError) as exc:
+            raise _voice_http_error(exc)
+        return {"speaker": profile, "created": True}
+
+    @app.post("/api/speakers/{member_id}/voice")
+    def bind_speaker_voice(member_id: str, voice_id: str = Form(default="")):
+        identity = _require_speaker_identity()
+        try:
+            profile = identity.registry.update_voice(member_id, voice_id or None)
+        except SpeakerError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"speaker": profile}
+
+    @app.post("/api/speakers/{member_id}/name")
+    def rename_speaker(member_id: str, display_name: str = Form()):
+        identity = _require_speaker_identity()
+        try:
+            profile = identity.registry.update_name(member_id, display_name)
+        except SpeakerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"speaker": profile}
+
+    @app.delete("/api/speakers/{member_id}")
+    def delete_speaker(member_id: str):
+        identity = _require_speaker_identity()
+        try:
+            removed = identity.registry.delete(member_id)
+        except SpeakerError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        if (speaker_identity.context.get() or {}).get("member_id") == member_id:
+            speaker_identity.context.clear()
+        return {"deleted": True, "speaker": removed}
+
+    @app.post("/api/voice/cache/clear")
+    def clear_voice_cache():
+        stack = _require_voice_stack()
+        cleared = stack.cache.clear()
+        return {"cleared": cleared}
+
     return app
 
 
@@ -224,11 +474,17 @@ def build_web_app(config) -> FastAPI:
     """运行时装配（CLI 复用同一套组件构造逻辑）。"""
     from .cli import _build_agent, _build_registry
     from .scheduler import RuleScheduler
+    from .voice.assembly import build_speaker_identity, build_tts_stack
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
     confirmer = WebConfirmer()
-    agent, rule_engine, executor = _build_agent(config, registry, memory_store, confirmer=confirmer)
+    voice_stack = build_tts_stack(config)
+    speaker_identity = build_speaker_identity(config, voice_stack.client)
+    agent, rule_engine, executor = _build_agent(
+        config, registry, memory_store, confirmer=confirmer,
+        member_context=speaker_identity.context,
+    )
 
     # 规划器与 Web 对话共用同一执行器：确认队列一致，防重放缓存也一致
     # （避免"对话刚开的灯"与"任务里的开灯"绕过彼此的重复执行保护）
@@ -250,6 +506,8 @@ def build_web_app(config) -> FastAPI:
         rule_engine=rule_engine,
         confirmer=confirmer,
         planner=planner,
+        voice_stack=voice_stack,
+        speaker_identity=speaker_identity,
     )
 
 

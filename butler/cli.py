@@ -19,7 +19,7 @@ from .config import (
 from .confirmation import ConsoleConfirmer
 from .conversation import Conversation
 from .devices.registry import DeviceRegistry
-from .llm_client import OpenAICompatClient
+from .llm_client import build_llm
 from .logging_setup import setup_logging
 from .memory.store import MemoryStore
 from .proactive import RuleEngine, build_proactive_tools
@@ -132,11 +132,12 @@ def _build_agent(
     registry: DeviceRegistry,
     memory_store: MemoryStore,
     confirmer=None,
+    member_context=None,
 ) -> tuple:
     tool_registry = ToolRegistry()
     for spec in build_home_tools(registry):
         tool_registry.register(spec)
-    for spec in build_memory_tools(memory_store):
+    for spec in build_memory_tools(memory_store, member_context=member_context):
         tool_registry.register(spec)
     for spec in build_proactive_tools(memory_store, device_registry=registry):
         tool_registry.register(spec)
@@ -147,17 +148,22 @@ def _build_agent(
         confirmer,
         confirmation_enabled=(config.confirmation_mode == CONFIRMATION_ALWAYS),
     )
-    llm = OpenAICompatClient(
-        base_url=config.base_url,
-        api_key=config.api_key,
-        model=config.model,
-        timeout_seconds=config.llm_timeout_seconds,
-        max_retries=config.llm_max_retries,
-    )
+    llm = build_llm(config, "main")
 
     def system_prompt_provider() -> str:
+        # 声纹识别出的当前说话人（未识别/文本模式为 None，行为不变）
+        member = member_context.get() if member_context is not None else None
+        if member:
+            memory_block = memory_store.prompt_block(
+                for_member_id=member["member_id"],
+                member_name=member["display_name"],
+            )
+        else:
+            # 未识别说话人（文本模式/陌生人）：只注入共享记忆，
+            # 任何成员的个人记忆都不进入陌生上下文
+            memory_block = memory_store.prompt_block(shared_only=True)
         return build_system_prompt(
-            _inventory(registry), datetime.now(), memory_store.prompt_block()
+            _inventory(registry), datetime.now(), memory_block, member=member
         )
 
     conversation = Conversation(system_prompt_provider(), config.max_history_messages)

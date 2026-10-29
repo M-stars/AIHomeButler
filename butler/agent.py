@@ -36,10 +36,20 @@ def build_system_prompt(
     device_inventory: str,
     now: datetime,
     memory_block: str = "（暂无已保存的长期记忆）",
+    member: dict = None,
 ) -> str:
+    # member：声纹识别出的当前说话人（None=未识别/文本模式，行为不变）
+    member_block = ""
+    if member:
+        member_block = (
+            f"当前说话人：{member.get('display_name')}（家庭成员，经声纹识别）。"
+            f"请用「{member.get('display_name')}」称呼对方；"
+            "记忆中标注【成员名】的是 TA 的个人记忆，【共享】为全家共用，"
+            "回答涉及偏好时优先采用 TA 的个人记忆。" + chr(10)
+        )
     return f"""你是"AI Home Butler"家庭的 AI 管家（Butler），通过调用工具了解和操作家庭设备。
 当前时间：{now.strftime('%Y-%m-%d %H:%M')}。
-
+{member_block}
 家庭设备清单：
 {device_inventory}
 

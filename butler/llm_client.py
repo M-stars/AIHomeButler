@@ -22,6 +22,8 @@ from openai import (
     RateLimitError,
 )
 
+from .config import ButlerConfig
+
 _log = logging.getLogger("butler.llm")
 
 _RETRYABLE_ERRORS = (
@@ -130,3 +132,20 @@ class OpenAICompatClient:
             "LLM 响应 model=%s tool_calls=%s usage=%s", self._model, len(tool_calls), usage
         )
         return LLMResponse(content=content, tool_calls=tool_calls, usage=usage)
+
+
+def build_llm(config: ButlerConfig, profile_name: str = "main") -> OpenAICompatClient:
+    """按命名模型档案构造客户端——装配层唯一的建模型入口。
+
+    角色约定：main=对话主模型（Agent），planner=多步任务规划（PlanRunner）；
+    档案未配置的变量自动回退全局 LLM_*，因此不写任何 LLM_<NAME>_* 时
+    所有角色都用同一个模型（与单模型时代行为一致）。
+    """
+    profile = config.model_profile(profile_name)
+    return OpenAICompatClient(
+        base_url=profile.base_url,
+        api_key=profile.api_key,
+        model=profile.model,
+        timeout_seconds=profile.timeout_seconds,
+        max_retries=profile.max_retries,
+    )

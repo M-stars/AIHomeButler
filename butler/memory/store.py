@@ -42,6 +42,7 @@ class MemoryStore:
                     kind TEXT NOT NULL CHECK (kind IN ('preference', 'fact')),
                     content TEXT NOT NULL,
                     source TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('user', 'inferred')),
+                    member_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -74,10 +75,19 @@ class MemoryStore:
                 """
             )
             self._conn.commit()
+            # 阶段 13 迁移：老库补 member_id 列（可空=共享记忆），重复执行忽略
+            try:
+                with self._lock:
+                    self._conn.execute("ALTER TABLE memories ADD COLUMN member_id TEXT")
+                    self._conn.commit()
+            except sqlite3.OperationalError:
+                pass
 
     # ------------------------------------------------------------- 记忆 CRUD
 
-    def add(self, kind: str, content: str, source: str = "user") -> int:
+    def add(self, kind: str, content: str, source: str = "user",
+            member_id: Optional[str] = None) -> int:
+        """新增记忆。member_id 非空表示该成员的个人记忆；None=家庭共享。"""
         if kind not in _KINDS:
             raise ValueError(f"记忆类型只能是 {'/'.join(_KINDS)}")
         content = (content or "").strip()
@@ -85,21 +95,37 @@ class MemoryStore:
             raise ValueError("记忆内容不能为空")
         with self._lock:
             cursor = self._conn.execute(
-                "INSERT INTO memories (kind, content, source, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (kind, content, source, _now(), _now()),
+                "INSERT INTO memories (kind, content, source, member_id, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (kind, content, source, member_id, _now(), _now()),
             )
             self._conn.commit()
             return int(cursor.lastrowid)
 
-    def list(self, kind: Optional[str] = None) -> List[Dict[str, Any]]:
-        query = "SELECT id, kind, content, source, created_at, updated_at FROM memories"
-        params: tuple = ()
+    def list(self, kind: Optional[str] = None,
+             for_member_id: Optional[str] = None,
+             shared_only: bool = False) -> List[Dict[str, Any]]:
+        """列出记忆。三种作用域：
+        - for_member_id 给定：该成员的个人记忆 + 家庭共享记忆；
+        - shared_only=True：仅共享记忆（未识别说话人时 Agent 的视图，
+          陌生人不能翻看任何成员的个人记忆）；
+        - 都不给：全部（管理视图，Web 记忆管理/CLI /memory 用）。"""
+        query = ("SELECT id, kind, content, source, member_id, created_at, updated_at"
+                 " FROM memories")
+        clauses: List[str] = []
+        params: List[Any] = []
         if kind:
             if kind not in _KINDS:
                 raise ValueError(f"记忆类型只能是 {'/'.join(_KINDS)}")
-            query += " WHERE kind = ?"
-            params = (kind,)
+            clauses.append("kind = ?")
+            params.append(kind)
+        if for_member_id:
+            clauses.append("(member_id IS NULL OR member_id = ?)")
+            params.append(for_member_id)
+        elif shared_only:
+            clauses.append("member_id IS NULL")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY updated_at DESC, id DESC"
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
@@ -134,15 +160,28 @@ class MemoryStore:
 
     # ------------------------------------------------------------ 提示词注入
 
-    def prompt_block(self, max_items: int = 20) -> str:
-        """生成注入系统提示词的记忆摘要块。"""
-        memories = self.list()[: max_items]
+    def prompt_block(self, max_items: int = 20,
+                     for_member_id: Optional[str] = None,
+                     member_name: Optional[str] = None,
+                     shared_only: bool = False) -> str:
+        """生成注入系统提示词的记忆摘要块。
+
+        for_member_id 给定时只注入"该成员的个人记忆 + 共享记忆"，
+        个人记忆单独打标（成员名）；shared_only=True 仅注入共享记忆。
+        """
+        memories = self.list(for_member_id=for_member_id,
+                             shared_only=shared_only)[: max_items]
         if not memories:
             return "（暂无已保存的长期记忆）"
         lines = []
         for m in memories:
             tag = {"preference": "偏好", "fact": "事实"}[m["kind"]]
-            lines.append(f"  - [{tag}] #{m['id']} {m['content']}")
+            owner = ""
+            if for_member_id and m.get("member_id"):
+                owner = f"【{member_name or '个人'}】"
+            elif for_member_id:
+                owner = "【共享】"
+            lines.append(f"  - [{tag}]{owner} #{m['id']} {m['content']}")
         return "\n".join(lines)
 
     # -------------------------------------------------------------- 任务日志

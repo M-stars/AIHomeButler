@@ -27,6 +27,13 @@
   连续命中+冷却防霸屏，纯通知，绝不自动控制设备）。
 - **双设备后端**：`DEVICE_BACKEND=simulated`（默认，安全）或 `homeassistant`（真实设备，
   白名单管控），Agent 层零改动切换。
+- **家庭成员声纹**（阶段 13）：注册家人声纹后，语音模式自动识别谁在说话——
+  称呼个性化、记忆按人隔离（陌生人只看共享记忆）、按成员切换回答音色；
+  声纹仅用于个性化，不作为身份验证，确认流程不放松。
+- **可选 CosyVoice 中文合成 + 音色库**（阶段 12）：`TTS_BACKEND=cosyvoice` 切换到
+  官方开源 CosyVoice（独立环境运行，主项目零新增依赖）；上传参考录音（需说话人
+  授权）即可克隆音色，管家用你的声音播报回复；服务故障按配置降级回 SAPI。
+  部署见 [docs/COSYVOICE_SETUP.md](docs/COSYVOICE_SETUP.md)。
 
 ## 快速开始
 
@@ -59,10 +66,23 @@ python -m butler
 
 命令：`/devices` 列出设备、`/help` 帮助、`/exit` 退出。
 
+### 多模型配置（可选）
+
+支持"一个主模型 + 若干次级模型"：每个角色一组 `LLM_<角色>_*` 变量
+（`BASE_URL` / `MODEL` / `API_KEY` / `TIMEOUT_SECONDS` / `MAX_RETRIES`），
+未定义的字段自动继承全局 `LLM_*` 配置。内置角色绑定：
+
+- `main` —— 对话主模型（Agent，完整工具集 function calling）
+- `planner` —— 多步任务规划（PlanRunner，独立汇报提示词）
+
+一个都不配置时所有角色共用全局模型，行为与单模型完全一致。
+换厂商/换模型只改 `.env`，不改代码；新增次级消费者时在装配处
+`build_llm(config, "<角色名>")` 绑定即可。
+
 ## 运行测试
 
 ```bash
-python -m pytest tests/            # 离线回归（91 项，不触网、零 API 成本）
+python -m pytest tests/            # 离线回归（不触网、零 API 成本）
 BUTLER_RUN_REAL_API_TESTS=1 python -m pytest tests/test_integration_real_api.py
                                    # 真实 API 集成测试（默认跳过）
 python -m butler.check_config      # 配置与环境自检
@@ -88,7 +108,7 @@ butler/
 ├── emulator/         # HA REST API 本地模拟器（无 HA 也能联调适配器）
 ├── voice/            # 语音桥接：SAPI TTS + faster-whisper ASR + 麦克风
 └── tools/            # 工具注册表、参数校验、安全执行器、家庭/记忆/规则工具集
-firmware/esphome/     # ESP32 固件配置（已通过校验并完成编译）
+firmware/esphome/     # ESP32 固件配置（ESPHome 2026.10.1 与 2025.5.2 双版本校验通过）
 scripts/              # HA 一键部署、备份脚本
 tests/                # 92 项测试：离线回归 + 真实 API 集成（默认跳过）
 docs/                 # 需求/架构/选型/复用/路线图/RUNBOOK/硬件/语音
@@ -101,7 +121,8 @@ docs/                 # 需求/架构/选型/复用/路线图/RUNBOOK/硬件/语
 
 - 真实 Home Assistant 容器待部署：Docker Desktop 已装好，**需重启一次电脑完成 WSL2**，
   然后管理员运行 `scripts\setup_homeassistant.ps1`（详见 docs/RUNBOOK.md 第 3 节）。
-- ESP32 待烧录：固件已编译完成，插线后 `esphome run firmware/esphome/esp32-butler.yaml`。
+- ESP32 待烧录：固件已通过 ESPHome 2026.10.1 校验；此前编译产物（2025.5.2）基于旧实体名，
+  插线后 `esphome run firmware/esphome/esp32-butler.yaml` 会自动重新编译并烧录。
 - 语音输入的噪声环境表现未做真实调试；无唤醒词（演进方向 HA Voice，见 docs/VOICE.md）。
 - `CONFIRMATION_MODE=never` 仅供调试，会跳过所有确认并输出警告日志。
 - Web 界面无登录鉴权，默认仅绑定 127.0.0.1，勿暴露公网。

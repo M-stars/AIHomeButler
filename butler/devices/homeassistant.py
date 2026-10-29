@@ -4,8 +4,8 @@
 API 语义：https://developers.home-assistant.io/docs/api/rest/
 
 错误语义映射（与 Device 抽象约定一致）：
-  - 连接失败/超时（读）            → DeviceOffline（设备/平台离线）
-  - 连接失败/超时（控制，结果不明） → StateUnknownError（不得报成功也不得报失败）
+  - 传输层失败（读）              → DeviceOffline（设备/平台离线）
+  - 传输层失败（控制，结果不明）   → StateUnknownError（不得报成功也不得报失败）
   - HTTP 401                       → HassApiError（令牌配置错误）
   - HTTP 404                       → DeviceNotFound
   - 其他 4xx/5xx                   → HassApiError
@@ -88,10 +88,14 @@ class HassClient:
     ):
         url = self._base + path
         try:
+            # trust_env=False：HA 在局域网，绝不能被 HTTP_PROXY 等环境代理接管——
+            # 代理返回的 5xx 会被误判为 API 错误，而非离线/结果不明
             response = httpx.request(
-                method, url, headers=self._headers, json=json, timeout=self._timeout
+                method, url, headers=self._headers, json=json,
+                timeout=self._timeout, trust_env=False,
             )
-        except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
+        except httpx.TransportError as exc:
+            # 覆盖全部传输层错误（拒连/超时/对端中断等）；
             # 控制类请求失败时结果不明：指令可能已到达 HA
             if ambiguous:
                 raise StateUnknownError(

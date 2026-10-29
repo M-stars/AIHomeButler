@@ -29,7 +29,8 @@ DHT22 模块            ESP32 DevKit
 
 ## 3. 固件配置与编译（已完成的部分）
 
-- 固件配置：`firmware/esphome/esp32-butler.yaml`（已通过 `esphome config` 校验）
+- 固件配置：`firmware/esphome/esp32-butler.yaml`（已通过 ESPHome 2026.10.1 与 2025.5.2
+  校验；实体名必须用 ASCII，原因见 yaml 头部命名约束）
 - 密钥文件：复制 `firmware/esphome/secrets.yaml.example` 为 `secrets.yaml`，
   填入你家 WiFi 与密码；`api_encryption_key` 用示例命令生成 32 字节随机密钥。
 - 编译：`esphome compile firmware/esphome/esp32-butler.yaml`
@@ -70,7 +71,8 @@ DHT22 模块            ESP32 DevKit
 | 项目 | 状态 |
 |---|---|
 | ESPHome 2025.5.2 安装（Windows, Python 3.9） | ✅ 已完成 |
-| 固件配置 `esphome config` 校验 | ✅ 已完成 |
-| 固件编译（下载完整工具链） | 见 git 提交记录（受网络波动影响） |
+| ESPHome 2026.10.1 校验（uv 临时环境, Python 3.13） | ✅ 已完成（2026-10-28，修复中文实体名转 ASCII ID 后的判重冲突） |
+| 固件配置 `esphome config` 校验 | ✅ 已完成（2026.10.1 + 2025.5.2 双版本） |
+| 固件编译（下载完整工具链） | 2025.5.2 产物已有；实体名修正后由 `esphome run` 自动重编 |
 | 烧录 + 真实传感器读数 | ⬜ 需要你把开发板用 USB 接上后执行第 4 节 |
 | HA 中自动发现 + AI 读取真实数据 | ⬜ 依赖上一步 |

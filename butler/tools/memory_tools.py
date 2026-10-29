@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ..memory.store import MemoryStore
 from .base import RISK_LOW, RISK_MEDIUM, ToolSpec
@@ -16,15 +16,35 @@ from .base import RISK_LOW, RISK_MEDIUM, ToolSpec
 _KIND_ENUM = ["preference", "fact"]
 
 
-def build_memory_tools(memory_store: MemoryStore) -> List[ToolSpec]:
+def build_memory_tools(memory_store: MemoryStore, member_context=None) -> List[ToolSpec]:
+    """member_context（可选）提供当前说话人身份：保存的个人记忆打成员标，
+    list 只看"本人+共享"；无成员上下文时行为与阶段 5 完全一致（全部共享）。"""
+    def _current_member() -> Optional[Dict]:
+        return member_context.get() if member_context is not None else None
+
     def _save_memory(args: Dict) -> Dict:
+        member = _current_member()
+        member_id = member["member_id"] if member else None
         memory_id = memory_store.add(
-            kind=args["kind"], content=args["content"], source="user"
+            kind=args["kind"], content=args["content"], source="user",
+            member_id=member_id,
         )
-        return {"memory_id": memory_id, "saved": True, "content": args["content"]}
+        return {
+            "memory_id": memory_id,
+            "saved": True,
+            "content": args["content"],
+            "owner": member["display_name"] if member else "家庭共享",
+        }
 
     def _list_memories(args: Dict) -> Dict:
-        memories = memory_store.list(kind=args.get("kind"))
+        member = _current_member()
+        if member:
+            memories = memory_store.list(
+                kind=args.get("kind"), for_member_id=member["member_id"],
+            )
+        else:
+            # 未识别说话人：只能看共享记忆，不能翻任何成员的个人记忆
+            memories = memory_store.list(kind=args.get("kind"), shared_only=True)
         return {"memories": memories, "count": len(memories)}
 
     def _update_memory(args: Dict) -> Dict:
@@ -52,6 +72,7 @@ def build_memory_tools(memory_store: MemoryStore) -> List[ToolSpec]:
             description=(
                 "保存用户明确陈述的长期偏好或事实（如作息偏好、称呼、家庭习惯）。"
                 "只允许保存用户亲口确认的信息，禁止保存你的推测。保存前会请求用户确认。"
+                "若当前已识别说话人成员，记忆归属该成员个人；否则归家庭共享。"
             ),
             parameters={
                 "type": "object",

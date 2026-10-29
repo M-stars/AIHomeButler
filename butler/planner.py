@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, List, Optional
 from .config import ButlerConfig
 from .confirmation import ConsoleConfirmer
 from .devices.registry import DeviceRegistry
-from .llm_client import LLMClient, LLMError, OpenAICompatClient
+from .llm_client import LLMClient, LLMError, build_llm
 from .memory.store import MemoryStore
 from .proactive import build_proactive_tools
 from .tools.executor import ToolExecutor
@@ -97,13 +97,7 @@ class PlanRunner:
             tool_registry.register(spec)
         if executor is None:
             executor = ToolExecutor(tool_registry, ConsoleConfirmer())
-        llm = OpenAICompatClient(
-            base_url=config.base_url,
-            api_key=config.api_key,
-            model=config.model,
-            timeout_seconds=config.llm_timeout_seconds,
-            max_retries=config.llm_max_retries,
-        )
+        llm = build_llm(config, "planner")
         return cls(llm, tool_registry, executor, registry, memory_store)
 
     # ------------------------------------------------------------------ 主流程

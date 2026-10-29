@@ -1,8 +1,11 @@
 """阶段 6 任务规划器测试：计划验证、顺序执行、中止语义、任务日志。"""
 import json
+import os
 
 from butler.confirmation import AutoApproveConfirmer, AutoDenyConfirmer
+from butler.config import load_config
 from butler.llm_client import LLMResponse
+from butler.memory.store import MemoryStore
 from butler.planner import PlanRunner
 from helpers import FakeLLM, make_agent, make_executor
 
@@ -22,6 +25,21 @@ def _text(text):
 def _make_runner(llm, tool_registry, registry, memory=None, confirmer=None):
     executor = make_executor(tool_registry, confirmer or AutoApproveConfirmer())
     return PlanRunner(llm, tool_registry, executor, registry, memory)
+
+
+def test_for_cli_assembles_all_tool_groups(registry, tmp_path, monkeypatch):
+    """回归：for_cli 必须能完整装配三类工具（曾因漏 import
+    build_proactive_tools 在 CLI /task 与 Web /api/task 上直接 NameError）。"""
+    for key in list(os.environ):
+        if key.startswith("LLM_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("LLM_API_KEY", "sk-test")
+    config = load_config(env_path=tmp_path / "missing.env")
+    runner = PlanRunner.for_cli(config, registry, MemoryStore(tmp_path / "memory.db"))
+    names = runner._tool_registry.names()
+    assert "get_sensor_readings" in names   # 设备工具
+    assert "save_memory" in names           # 记忆工具
+    assert "list_rules" in names            # 主动服务工具
 
 
 def test_happy_path_plan_executes_in_order(tool_registry, registry):
