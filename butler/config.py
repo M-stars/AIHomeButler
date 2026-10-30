@@ -58,6 +58,10 @@ class ButlerConfig:
     llm_timeout_seconds: float
     llm_max_retries: int
     max_tool_calls_per_turn: int
+    # 单次模型响应携带的 tool_calls 上限：超出部分不执行并回填错误结果（评审 4.2）
+    max_tool_calls_per_response: int
+    # 每日 token 预算：0=不限；超限后拒绝新的模型调用（评审 4.5）
+    daily_token_budget: int
     max_history_messages: int
     confirmation_mode: str
     device_backend: str
@@ -69,6 +73,8 @@ class ButlerConfig:
     data_dir: Path
     log_dir: Path
     log_level: str
+    # Web 鉴权（评审 4.3）：留空则每次启动自动生成随机令牌并打印到控制台
+    web_token: str
     # 语音合成（阶段 12）：默认 sapi 保持历史行为不变
     tts_backend: str
     cosyvoice_url: str
@@ -191,6 +197,8 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         llm_timeout_seconds=_get_float("LLM_TIMEOUT_SECONDS", 60.0),
         llm_max_retries=_get_int("LLM_MAX_RETRIES", 3),
         max_tool_calls_per_turn=_get_int("MAX_TOOL_CALLS_PER_TURN", 8),
+        max_tool_calls_per_response=_get_int("MAX_TOOL_CALLS_PER_RESPONSE", 4),
+        daily_token_budget=_get_int("TOKEN_BUDGET_PER_DAY", 500_000, minimum=0),
         max_history_messages=_get_int("MAX_HISTORY_MESSAGES", 60, minimum=10),
         confirmation_mode=confirmation_mode,
         device_backend=device_backend,
@@ -205,6 +213,7 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         data_dir=data_dir,
         log_dir=PROJECT_ROOT / "logs",
         log_level=log_level,
+        web_token=os.environ.get("WEB_TOKEN", "").strip(),
         # 语音合成：CosyVoice 为可选后端，默认 sapi 保证原有行为不变
         tts_backend=tts_backend,
         cosyvoice_url=cosyvoice_url,

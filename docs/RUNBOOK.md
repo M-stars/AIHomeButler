@@ -7,7 +7,7 @@
 | 方式 | 命令 | 说明 |
 |---|---|---|
 | 文本对话 | `python -m butler` | 命令行，最轻量 |
-| Web 界面 | `python -m butler.webapp` | 浏览器打开 http://127.0.0.1:8080/ |
+| Web 界面 | `python -m butler.webapp` | 浏览器打开控制台打印的带令牌地址（http://127.0.0.1:8080/?token=…） |
 | 语音模式 | `python -m butler.voice`（`--mic` 语音输入） | 共用同一套确认机制 |
 | 配置自检 | `python -m butler.check_config` | 任何启动问题先跑这个 |
 
@@ -76,7 +76,9 @@ HA 的机器上以假乱真地调试适配器（`python -m butler.emulator --por
 - `.env`、`config/ha_devices.json`、`firmware/esphome/secrets.yaml` 均在 `.gitignore`，
   任何情况下不要提交或截图分享；
 - `CONFIRMATION_MODE=never` 仅限调试，用完改回 `always`；
-- Web 界面默认只绑定 127.0.0.1，**不要** `--host 0.0.0.0` 暴露到局域网/公网
+- Web 界面默认只绑定 127.0.0.1，**不要** `--host 0.0.0.0` 暴露到局域网/公网；
+- 所有 API 都要求访问令牌：启动时控制台打印带 `?token=` 的地址（首次打开后浏览器会记住）；
+  固定令牌在 .env 设 `WEB_TOKEN`
   （当前无登录鉴权）；
 - 高风险设备（门锁/燃气/电热）在系统内没有注册任何工具，也不会通过 HA 白名单
   以外的路径接入；如未来需要，必须先单独设计授权流程。

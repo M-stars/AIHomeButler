@@ -4,15 +4,20 @@
   - 与 CLI 共用同一 Agent/工具/安全层；控制类操作的确认通过"确认队列"完成：
     对话请求阻塞等待用户在页面上批准/拒绝（超时按拒绝处理），绝不静默放行；
   - 同一时刻只允许一个对话/任务在执行（防止并发操作同一设备与上下文错乱）；
-  - API 无需登录仅限本机使用（默认绑定 127.0.0.1）；文档说明不要暴露到公网。
+  - API 全部要求访问令牌（评审 4.3）：.env 设 WEB_TOKEN 即用固定值，
+    留空则每次启动自动生成随机令牌并打印到控制台；令牌错误一律 401，
+    防止本机其他进程或浏览器里访问的恶意网页（CSRF）操控设备/读隐私。
 
 阶段 12 扩展：音色库管理 API（/api/voices*）与语音合成 API（/api/voice*）。
 语音栈为可选装配（voice_stack=None 时这些端点返回 503），不影响原有功能。
+
+阶段 14 扩展：审计日志（/api/audit，评审 4.4）与每日 token 预算展示（评审 4.5）。
 """
 from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import sys
 import tempfile
 import threading
@@ -21,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
@@ -142,8 +147,35 @@ def create_app(
     planner: Optional[PlanRunner] = None,
     voice_stack=None,
     speaker_identity=None,
+    auth_token: Optional[str] = None,
+    token_budget=None,
 ) -> FastAPI:
     app = FastAPI(title="AI Home Butler", docs_url=None, redoc_url=None)
+    # 访问令牌：未显式传入（或配置为空）时自动生成随机值，启动时打印到控制台
+    app.state.auth_token = auth_token or secrets.token_urlsafe(24)
+
+    # ---- 访问鉴权（评审 4.3）：除静态外壳页外，所有请求必须携带正确令牌 ----
+    @app.middleware("http")
+    async def _require_token(request: Request, call_next):
+        if request.url.path != "/":
+            supplied = (
+                request.headers.get("X-Butler-Token")
+                or request.query_params.get("token")
+            )
+            if not supplied:
+                auth_header = request.headers.get("Authorization", "")
+                if auth_header.startswith("Bearer "):
+                    supplied = auth_header[len("Bearer "):]
+            if not supplied or not secrets.compare_digest(
+                supplied, app.state.auth_token
+            ):
+                return Response(
+                    content='{"detail":"未授权：缺少或错误的访问令牌"}',
+                    status_code=401,
+                    media_type="application/json",
+                )
+        return await call_next(request)
+
     state: Dict[str, Any] = {
         "agent_lock": threading.Lock(),
         "task_lock": threading.Lock(),
@@ -181,6 +213,7 @@ def create_app(
             "confirmation_mode": config.confirmation_mode,
             # 旧配置桩可能没有该字段：语音后端仅作展示用，缺省按 sapi 呈现
             "tts_backend": getattr(config, "tts_backend", "sapi"),
+            "token_budget": token_budget.status() if token_budget is not None else None,
         }
 
     @app.post("/api/chat")
@@ -227,9 +260,20 @@ def create_app(
 
     @app.post("/api/confirmations/{confirmation_id}")
     def respond_confirmation(confirmation_id: str, payload: ConfirmationRequest):
+        # 先取摘要再应答：respond 后确认项会被等待线程移除
+        summary = next(
+            (c["summary"] for c in confirmer.pending() if c["id"] == confirmation_id),
+            confirmation_id,
+        )
         ok = confirmer.respond(confirmation_id, payload.approved)
         if not ok:
             raise HTTPException(status_code=404, detail="确认请求不存在或已处理")
+        memory_store.add_audit(
+            "confirmation.respond",
+            f"{'批准' if payload.approved else '拒绝'}：{summary}",
+            "ok" if payload.approved else "declined",
+            actor="user",
+        )
         return {"resolved": True, "approved": payload.approved}
 
     @app.get("/api/memories")
@@ -259,6 +303,10 @@ def create_app(
     @app.get("/api/tasks")
     def tasks():
         return {"tasks": memory_store.list_task_logs()}
+
+    @app.get("/api/audit")
+    def audit(limit: int = 100):
+        return {"audit": memory_store.list_audit(limit=limit)}
 
     # ---- 语音：状态 / 音色库 / 合成（阶段 12，voice_stack 未装配时全部 503）----
 
@@ -303,6 +351,9 @@ def create_app(
             )
         except VoiceProfileError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        memory_store.add_audit(
+            "voice.create", f"音色「{profile['display_name']}」（{profile['voice_id']}）", "ok", actor="user"
+        )
         return {"voice": profile, "created": True}
 
     @app.post("/api/voices/preset")
@@ -326,6 +377,9 @@ def create_app(
             )
         except VoiceProfileError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        memory_store.add_audit(
+            "voice.create", f"预设音色「{profile['display_name']}」（{profile['voice_id']}）", "ok", actor="user"
+        )
         return {"voice": profile, "created": True}
 
     @app.post("/api/voices/{voice_id}/default")
@@ -358,6 +412,9 @@ def create_app(
             stack.cosyvoice_speaker.set_voice(None)  # 回退到模型预设音色
         # 删除音色时一并清除其生成缓存（隐私默认：档案删除则生成物随之清除）
         stack.cache.purge_voice(voice_id)
+        memory_store.add_audit(
+            "voice.delete", f"音色「{removed['display_name']}」（{voice_id}）及其生成缓存", "ok", actor="user"
+        )
         return {"deleted": True, "voice": removed}
 
     @app.post("/api/voices/{voice_id}/test")
@@ -430,6 +487,11 @@ def create_app(
             )
         except (SpeakerError, CosyVoiceClientError) as exc:
             raise _voice_http_error(exc)
+        memory_store.add_audit(
+            "speaker.enroll",
+            f"成员「{profile['display_name']}」（{profile['member_id']}）声纹注册，授权={consent_granted}",
+            "ok", actor="user",
+        )
         return {"speaker": profile, "created": True}
 
     @app.post("/api/speakers/{member_id}/voice")
@@ -459,6 +521,9 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc))
         if (speaker_identity.context.get() or {}).get("member_id") == member_id:
             speaker_identity.context.clear()
+        memory_store.add_audit(
+            "speaker.delete", f"成员「{removed['display_name']}」（{member_id}）声纹档案删除", "ok", actor="user"
+        )
         return {"deleted": True, "speaker": removed}
 
     @app.post("/api/voice/cache/clear")
@@ -474,6 +539,7 @@ def build_web_app(config) -> FastAPI:
     """运行时装配（CLI 复用同一套组件构造逻辑）。"""
     from .cli import _build_agent, _build_registry
     from .scheduler import RuleScheduler
+    from .token_budget import TokenBudget
     from .voice.assembly import build_speaker_identity, build_tts_stack
 
     registry = _build_registry(config)
@@ -498,6 +564,9 @@ def build_web_app(config) -> FastAPI:
     )
     scheduler.start()
 
+    # 每日 token 预算展示（用量统计本身在 llm_client 中强制执行）
+    token_budget = TokenBudget(memory_store, config.daily_token_budget)
+
     return create_app(
         config=config,
         registry=registry,
@@ -508,6 +577,8 @@ def build_web_app(config) -> FastAPI:
         planner=planner,
         voice_stack=voice_stack,
         speaker_identity=speaker_identity,
+        auth_token=config.web_token or None,
+        token_budget=token_budget,
     )
 
 
@@ -529,7 +600,12 @@ def main() -> int:
         return 2
     setup_logging(config.log_dir, config.log_level)
     app = build_web_app(config)
-    print(f"AI Home Butler 界面: http://{args.host}:{args.port}/")
+    token = app.state.auth_token
+    print(f"AI Home Butler 界面: http://{args.host}:{args.port}/?token={token}")
+    if config.web_token:
+        print("（访问令牌来自 .env 的 WEB_TOKEN，页面首次打开后无需再带）")
+    else:
+        print("（访问令牌为本次启动自动生成的随机值；在 .env 设 WEB_TOKEN 可固定）")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 

@@ -72,6 +72,18 @@ class MemoryStore:
                     message TEXT NOT NULL,
                     read INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    actor TEXT NOT NULL DEFAULT 'system',
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS token_usage (
+                    day TEXT PRIMARY KEY,
+                    used_tokens INTEGER NOT NULL DEFAULT 0
+                );
                 """
             )
             self._conn.commit()
@@ -100,7 +112,9 @@ class MemoryStore:
                 (kind, content, source, member_id, _now(), _now()),
             )
             self._conn.commit()
-            return int(cursor.lastrowid)
+            memory_id = int(cursor.lastrowid)
+        self.add_audit("memory.add", f"#{memory_id} [{kind}] {content[:200]}", "ok")
+        return memory_id
 
     def list(self, kind: Optional[str] = None,
              for_member_id: Optional[str] = None,
@@ -141,7 +155,10 @@ class MemoryStore:
                 (content, _now(), int(memory_id)),
             )
             self._conn.commit()
-            return cursor.rowcount > 0
+            changed = cursor.rowcount > 0
+        if changed:
+            self.add_audit("memory.update", f"#{int(memory_id)} → {content[:200]}", "ok")
+        return changed
 
     def delete(self, memory_id: int) -> bool:
         with self._lock:
@@ -149,7 +166,10 @@ class MemoryStore:
                 "DELETE FROM memories WHERE id = ?", (int(memory_id),)
             )
             self._conn.commit()
-            return cursor.rowcount > 0
+            deleted = cursor.rowcount > 0
+        if deleted:
+            self.add_audit("memory.delete", f"#{int(memory_id)}（物理删除，不再参与决策）", "ok")
+        return deleted
 
     def export(self) -> Dict[str, Any]:
         return {
@@ -299,6 +319,67 @@ class MemoryStore:
             cursor = self._conn.execute("UPDATE notifications SET read = 1 WHERE read = 0")
             self._conn.commit()
             return cursor.rowcount
+
+    # ------------------------------------------------------------------ 审计日志
+
+    _AUDIT_RETENTION = 2000
+
+    def add_audit(self, action: str, detail: str = "", status: str = "",
+                  actor: str = "system") -> int:
+        """追加一条审计记录。actor: system=存储层自动记录 / agent=模型工具调用 /
+        user=Web 界面操作。超量历史在写入时按保留上限裁剪。"""
+        action = (action or "").strip()
+        if not action:
+            raise ValueError("审计 action 不能为空")
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO audit_log (created_at, actor, action, detail, status)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (_now(), actor, action, (detail or "")[:500], (status or "")[:50]),
+            )
+            self._conn.execute(
+                "DELETE FROM audit_log WHERE id <= ("
+                " SELECT id FROM audit_log ORDER BY id DESC LIMIT 1 OFFSET ?)",
+                (self._AUDIT_RETENTION,),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
+    def list_audit(self, limit: int = 100) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, created_at, actor, action, detail, status FROM audit_log"
+                " ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------- token 用量
+
+    def add_tokens_used(self, total_tokens: int) -> int:
+        """累计当日 token 用量（按本地日期分桶），返回累计后的当日总量。"""
+        total_tokens = max(0, int(total_tokens))
+        day = _now()[:10]
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO token_usage (day, used_tokens) VALUES (?, ?)"
+                " ON CONFLICT(day) DO UPDATE SET used_tokens = used_tokens + ?",
+                (day, total_tokens, total_tokens),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT used_tokens FROM token_usage WHERE day = ?", (day,)
+            ).fetchone()
+        return int(row["used_tokens"]) if row else 0
+
+    def tokens_used_today(self) -> int:
+        day = _now()[:10]
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT used_tokens FROM token_usage WHERE day = ?", (day,)
+            ).fetchone()
+        return int(row["used_tokens"]) if row else 0
 
     def close(self) -> None:
         with self._lock:

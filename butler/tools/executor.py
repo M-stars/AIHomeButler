@@ -52,12 +52,16 @@ class ToolExecutor:
         confirmer: Confirmer,
         confirmation_enabled: bool = True,
         dedup_window_seconds: float = 3.0,
+        audit_sink=None,
         logger: logging.Logger = None,
     ) -> None:
         self._registry = registry
         self._confirmer = confirmer
         self._confirmation_enabled = confirmation_enabled
         self._dedup_window = max(0.0, float(dedup_window_seconds))
+        # 审计落点（可选）：每次工具执行后回调 audit_sink(action, detail, status)。
+        # 传 memory_store.add_audit 即落库；不传则只记运行日志。
+        self._audit = audit_sink
         self._recent_success: Dict[str, Tuple[float, ToolResult]] = {}
         self._pool = futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="butler-tool")
         self._log = logger or logging.getLogger("butler.tools")
@@ -70,6 +74,14 @@ class ToolExecutor:
             "工具执行 tool=%s status=%s stage=%s duration_ms=%s args=%s",
             tool_name, result.status, result.stage, elapsed_ms, (raw_arguments or "")[:200],
         )
+        if self._audit is not None:
+            try:
+                self._audit(
+                    "tool.call", f"{tool_name} {(raw_arguments or '')[:200]}", result.status,
+                    actor="agent",
+                )
+            except Exception:  # 审计失败不影响工具结果
+                self._log.exception("审计记录写入失败 tool=%s", tool_name)
         return result
 
     # ------------------------------------------------------------------ 主流程

@@ -91,7 +91,8 @@ def make_executor(tool_registry, confirmer=None, confirmation_enabled=True):
     )
 
 
-def make_agent(fake_llm, tool_registry, confirmer=None, max_tool_calls=8):
+def make_agent(fake_llm, tool_registry, confirmer=None, max_tool_calls=8,
+               max_tool_calls_per_response=4):
     conversation = Conversation("你是测试管家，回答用中文。", max_messages=60)
     executor = make_executor(tool_registry, confirmer)
     return Agent(
@@ -100,4 +101,5 @@ def make_agent(fake_llm, tool_registry, confirmer=None, max_tool_calls=8):
         tool_registry=tool_registry,
         tool_executor=executor,
         max_tool_calls_per_turn=max_tool_calls,
+        max_tool_calls_per_response=max_tool_calls_per_response,
     )

@@ -125,7 +125,8 @@ docs/                 # 需求/架构/选型/复用/路线图/RUNBOOK/硬件/语
   插线后 `esphome run firmware/esphome/esp32-butler.yaml` 会自动重新编译并烧录。
 - 语音输入的噪声环境表现未做真实调试；无唤醒词（演进方向 HA Voice，见 docs/VOICE.md）。
 - `CONFIRMATION_MODE=never` 仅供调试，会跳过所有确认并输出警告日志。
-- Web 界面无登录鉴权，默认仅绑定 127.0.0.1，勿暴露公网。
+- Web 界面要求访问令牌（.env 设 WEB_TOKEN，留空则每次启动自动生成并打印），
+  默认仅绑定 127.0.0.1，勿暴露公网。
 - 主动服务为纯通知级：设备自动化交给 HA 内置自动化承担（安全设计）。
 
 ## 安全提示

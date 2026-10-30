@@ -24,6 +24,7 @@ from .logging_setup import setup_logging
 from .memory.store import MemoryStore
 from .proactive import RuleEngine, build_proactive_tools
 from .scheduler import RuleScheduler
+from .token_budget import TokenBudget
 from .tools.executor import ToolExecutor
 from .tools.home import build_default_devices, build_home_tools
 from .tools.memory_tools import build_memory_tools
@@ -147,8 +148,10 @@ def _build_agent(
         tool_registry,
         confirmer,
         confirmation_enabled=(config.confirmation_mode == CONFIRMATION_ALWAYS),
+        audit_sink=memory_store.add_audit,
     )
-    llm = build_llm(config, "main")
+    budget = TokenBudget(memory_store, config.daily_token_budget)
+    llm = build_llm(config, "main", token_budget=budget)
 
     def system_prompt_provider() -> str:
         # 声纹识别出的当前说话人（未识别/文本模式为 None，行为不变）

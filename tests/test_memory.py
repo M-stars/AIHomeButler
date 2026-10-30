@@ -139,3 +139,27 @@ def test_agent_refreshes_system_prompt_with_latest_memory(tmp_path):
     # 第二轮的系统提示词应包含刚保存的记忆
     second_call_system = llm.calls[2]["messages"][0]["content"]
     assert "我习惯睡前喝温水" in second_call_system
+
+
+def test_audit_records_memory_mutations(store):
+    """记忆增/改/删自动落审计（评审 4.4），倒序返回最新在前。"""
+    memory_id = store.add("preference", "喜欢柔和灯光")
+    store.update(memory_id, "喜欢夜灯")
+    store.delete(memory_id)
+    entries = store.list_audit()
+    assert [e["action"] for e in entries[:3]] == [
+        "memory.delete", "memory.update", "memory.add",
+    ]
+    assert f"#{memory_id}" in entries[2]["detail"]
+
+
+def test_audit_rejects_empty_action(store):
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        store.add_audit("  ")
+
+
+def test_token_usage_accumulates_and_buckets_by_day(store):
+    assert store.add_tokens_used(10) == 10
+    assert store.add_tokens_used(15) == 25
+    assert store.tokens_used_today() == 25
