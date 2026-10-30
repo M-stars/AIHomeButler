@@ -85,6 +85,11 @@ class ButlerConfig:
     # 家庭成员声纹识别（阶段 13）：默认关闭，行为不变
     speaker_recognition: bool
     speaker_threshold: float
+    # 唤醒词（阶段 14）：默认关闭，--mic 行为不变
+    wakeword_enabled: bool
+    wake_word: str
+    wake_word_model_dir: Path
+    wake_word_threshold: float
 
     def model_profile(self, name: str) -> ModelProfile:
         """读取命名模型档案（.env 中 LLM_<NAME>_BASE_URL/MODEL/API_KEY/
@@ -180,6 +185,11 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
             raise ConfigError(f"配置 HA_URL 必须以 http(s):// 开头，当前值：{ha_url!r}")
 
     data_dir = PROJECT_ROOT / os.environ.get("DATA_DIR", "data").strip()
+    wake_model_dir_env = os.environ.get("WAKEWORD_MODEL_DIR", "").strip()
+    wake_word_model_dir = (
+        PROJECT_ROOT / wake_model_dir_env if wake_model_dir_env
+        else data_dir / "models" / "sherpa-kws"
+    )
 
     tts_backend = os.environ.get("TTS_BACKEND", TTS_BACKEND_SAPI).strip().lower()
     if tts_backend not in _VALID_TTS_BACKENDS:
@@ -229,5 +239,13 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         in ("1", "true", "yes", "on"),
         speaker_threshold=min(
             0.95, max(0.05, _get_float("SPEAKER_THRESHOLD", 0.30))
+        ),
+        # 唤醒词：默认关闭；开启后 --mic 模式待机监听（依赖 sherpa-onnx 与本地模型）
+        wakeword_enabled=os.environ.get("WAKEWORD_ENABLED", "0").strip().lower()
+        in ("1", "true", "yes", "on"),
+        wake_word=os.environ.get("WAKE_WORD", "小管家").strip() or "小管家",
+        wake_word_model_dir=wake_word_model_dir,
+        wake_word_threshold=min(
+            0.95, max(0.05, _get_float("WAKEWORD_THRESHOLD", 0.25))
         ),
     )

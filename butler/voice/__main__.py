@@ -10,6 +10,10 @@
 声纹识别，识别出的成员获得：称呼个性化、按人隔离的记忆、其绑定的回答音色；
 识别不出按"陌生人"回落通用模式。键盘输入可用 /who 手动指定成员（调试）。
 
+唤醒词（阶段 14，--wake 或 WAKEWORD_ENABLED=1 启用，需 --mic）：待机时本地
+离线检测唤醒词（sherpa-onnx KWS，默认「小管家」），命中后自动开始聆听指令，
+处理完回落待机。依赖/模型缺失自动退回免唤醒模式，见 docs/VOICE.md。
+
 与文本 CLI 完全共用同一套 Agent/工具/确认/安全机制，高风险操作不会因语音绕过确认。
 """
 from __future__ import annotations
@@ -17,6 +21,7 @@ from __future__ import annotations
 import argparse
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +32,7 @@ from ..memory.store import MemoryStore
 from .assembly import SpeakerIdentity, build_speaker_identity, build_tts_stack
 from .profiles import VoiceProfileError
 from .tts import SilentSpeaker, Speaker, Transcriber, VoiceError, WhisperTranscriber
+from .wakeword import build_wake_word_detector, play_wake_chime, wait_for_wake
 
 
 def _build_transcriber(enabled: bool) -> Transcriber:
@@ -75,6 +81,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="AI Home Butler 语音模式")
     parser.add_argument("--no-speak", action="store_true", help="禁用语音输出（调试用）")
     parser.add_argument("--mic", action="store_true", help="启用麦克风语音输入（需可选依赖）")
+    parser.add_argument(
+        "--wake", action="store_true",
+        help="待机监听唤醒词（需 --mic；.env 设 WAKEWORD_ENABLED=1 可默认开启）",
+    )
     parser.add_argument("--wav", type=str, default=None, help="处理单个 wav 文件后退出")
     args = parser.parse_args()
 
@@ -117,6 +127,24 @@ def main() -> int:
     except VoiceError as exc:
         print(f"[语音输入不可用] {exc}，回退为键盘输入")
 
+    # 唤醒词（阶段 14）：只决定"何时开始聆听"，不参与任何权限判断。
+    # 依赖/模型缺失时退回免唤醒模式，绝不因此拒绝启动；键盘输入模式与唤醒词
+    # 互斥——显式给 --wake 说明命令写错要拦下，仅配置默认开启则提示后照常启动。
+    wake_detector = None
+    wake_requested = args.wake or config.wakeword_enabled
+    if wake_requested and not args.mic:
+        if args.wake:
+            print("[配置错误] 唤醒词需要与 --mic 一起使用（待机监听依赖麦克风）")
+            return 2
+        print("[提示] WAKEWORD_ENABLED=1 但本次是键盘输入模式，忽略唤醒词")
+    elif wake_requested:
+        try:
+            # 显式传 enabled=True：--wake 旗标要在 .env 未配置时也生效
+            wake_detector = build_wake_word_detector(config, enabled=True)
+        except VoiceError as exc:
+            print(f"[唤醒词不可用] {exc}，本次退回免唤醒模式")
+            wake_detector = None
+
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
     agent, rule_engine, _executor = _build_agent(
@@ -138,6 +166,10 @@ def main() -> int:
               + ("" if transcriber is not None else "（键盘输入模式不识别，可用 /who 手动指定）"))
     else:
         print("声纹识别: 关闭（.env 设 SPEAKER_RECOGNITION=1 并启动 CosyVoice 服务后启用）")
+    if wake_detector is not None:
+        print(f"唤醒词: 开启（待机时说「{config.wake_word}」唤醒）")
+    elif args.mic:
+        print("唤醒词: 关闭（--wake 或 .env 设 WAKEWORD_ENABLED=1；模型见 docs/VOICE.md）")
     print("输入文字后回车；控制类操作仍会在终端请求 y/N 确认。/exit 退出")
     print("键盘模式命令：/who 列出成员 ｜ /who 名字 切换身份 ｜ /who off 恢复陌生模式")
     print("=" * 56)
@@ -168,6 +200,19 @@ def main() -> int:
             if transcriber is not None:
                 from .tts import MicrophoneRecorder
 
+                if wake_detector is not None:
+                    print(f"\n（待机中，说「{config.wake_word}」唤醒；Ctrl+C 退出）")
+                    try:
+                        wake_label = wait_for_wake(wake_detector)
+                    except Exception as exc:  # 麦克风被占用/拔出等：重试但不刷屏
+                        print(f"[唤醒监听失败] {exc}，1 秒后重试")
+                        time.sleep(1.0)
+                        continue
+                    if wake_label is None:  # 音频块迭代器耗尽（正常麦克风流不会发生）
+                        print("[唤醒监听] 音频流已结束，退出")
+                        return 0
+                    play_wake_chime()
+                    print(f"[已唤醒] {wake_label}，请说指令")
                 recorder = MicrophoneRecorder()
                 wav_path = Path(tempfile.gettempdir()) / "butler_utterance.wav"
                 print("\n（请说话，停止说话 1 秒后自动识别）")

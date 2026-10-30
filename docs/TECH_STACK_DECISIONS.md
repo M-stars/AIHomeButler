@@ -38,3 +38,22 @@
 ## 4. 变更流程
 
 任何选型变更：先在本文档追加"变更记录"（日期/动机/对比/影响面），再改代码。
+
+## 5. 变更记录
+
+### 2026-10-31 ｜ 阶段 14 唤醒词引擎：sherpa-onnx KeywordSpotter
+
+- **动机**：语音模式此前是"按键说话"，需要免手触的待机唤醒；且需兼顾后续
+  树莓派部署（低功耗 CPU、aarch64）。
+- **决策**：复用 k2-fsa sherpa-onnx 的 KWS 能力 + 官方中文模型
+  （wenetspeech 10000 小时训练，zipformer 3.3M，int8 约 33 MB，Apache-2.0）。
+  唤醒词以"声母+带调韵母"写在 keywords.txt，改词免训练。延迟导入可选依赖，
+  缺失自动退回免唤醒模式（与 pyttsx3/faster-whisper 同一降级约定）。
+- **对比**：openWakeWord（预训练词全英文、中文自定义需自行训练）；
+  Picovoice Porcupine（自定义词要注册账号生成 .ppn，闭源免费档有配额）；
+  Vosk 语法限定识别（模型重、KWS 精度一般）；
+  HA Voice/microWakeWord on ESP32-S3（需换带麦硬件，仍是长期演进方向）。
+- **验证**：本机实测 int8 单线程约 50 倍实时；模型官方测试人声命中配对词；
+  SAPI 合成"小管家"在生产 keywords.txt 下 1.1s 处命中（tests/test_wakeword.py 回归）。
+- **影响面**：新增 butler/voice/wakeword.py、scripts/wakeword_download_model.*、
+  config 4 个 WAKEWORD_* 配置项；--mic 主循环加待机分支；默认关闭，既有行为零变化。

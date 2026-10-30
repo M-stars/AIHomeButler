@@ -12,6 +12,8 @@ python-multipart>=0.0.9
 # pyttsx3>=2.90
 # faster-whisper>=1.0.0
 # sounddevice>=0.4.6
+# 唤醒词（可选，阶段 14：WAKEWORD_ENABLED=1 时需要；实测 sherpa-onnx 2.0.1）
+# sherpa-onnx>=1.10
 # CosyVoice 后端为主项目新增的仅 HTTP 客户端（httpx 已含），无需额外依赖；
 # CosyVoice 服务端运行在独立 Python 3.10 环境，见 docs/COSYVOICE_SETUP.md
 

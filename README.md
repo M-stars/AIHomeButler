@@ -3,9 +3,10 @@
 在成熟开源智能家居基础设施之上构建的 AI 家庭管家：具备环境理解、记忆、任务规划、
 安全执行与主动服务能力。**不重复造 Home Assistant，不重写语音引擎。**
 
-许可证：[MIT](LICENSE) ｜ 当前状态：**阶段 0-11 首轮全部完成** —— 文本/网页/语音三种交互，
-模拟与 Home Assistant 双设备后端，长期记忆，多步骤任务规划，主动提醒，语音播报；
-真实 HA 容器与 ESP32 烧录各差一步用户操作（见 docs/ROADMAP.md「近期待办」）。
+许可证：[MIT](LICENSE) ｜ 当前状态：**阶段 0-14 首轮全部完成** —— 文本/网页/语音三种交互，
+模拟与 Home Assistant 双设备后端，长期记忆，多步骤任务规划，主动提醒，语音播报，
+成员声纹识别，唤醒词待机；真实 HA 容器与 ESP32 烧录各差一步用户操作
+（见 docs/ROADMAP.md「近期待办」）。
 
 - 需求与验收：[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)
 - 架构设计：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
@@ -30,6 +31,9 @@
 - **家庭成员声纹**（阶段 13）：注册家人声纹后，语音模式自动识别谁在说话——
   称呼个性化、记忆按人隔离（陌生人只看共享记忆）、按成员切换回答音色；
   声纹仅用于个性化，不作为身份验证，确认流程不放松。
+- **唤醒词待机**（阶段 14）：`--mic --wake` 说「小管家」唤醒——sherpa-onnx 离线
+  关键词检测（3.3M 模型约 33 MB，CPU 约 50 倍实时，树莓派可跑），换唤醒词改
+  keywords.txt 即可无需训练；依赖未装自动退回免唤醒模式。见 docs/VOICE.md §6。
 - **可选 CosyVoice 中文合成 + 音色库**（阶段 12）：`TTS_BACKEND=cosyvoice` 切换到
   官方开源 CosyVoice（独立环境运行，主项目零新增依赖）；上传参考录音（需说话人
   授权）即可克隆音色，管家用你的声音播报回复；服务故障按配置降级回 SAPI。
@@ -106,11 +110,11 @@ butler/
 ├── memory/           # SQLite 长期记忆、任务日志、规则与通知
 ├── devices/          # 设备抽象 + 模拟设备 + Home Assistant 适配器 + 注册表
 ├── emulator/         # HA REST API 本地模拟器（无 HA 也能联调适配器）
-├── voice/            # 语音桥接：SAPI TTS + faster-whisper ASR + 麦克风
+├── voice/            # 语音桥接：SAPI TTS + faster-whisper ASR + 麦克风 + 唤醒词
 └── tools/            # 工具注册表、参数校验、安全执行器、家庭/记忆/规则工具集
 firmware/esphome/     # ESP32 固件配置（ESPHome 2026.10.1 与 2025.5.2 双版本校验通过）
 scripts/              # HA 一键部署、备份脚本
-tests/                # 92 项测试：离线回归 + 真实 API 集成（默认跳过）
+tests/                # 227 项测试：离线回归 + 真实 API 集成（默认跳过）
 docs/                 # 需求/架构/选型/复用/路线图/RUNBOOK/硬件/语音
 ```
 

@@ -1,6 +1,6 @@
-# 语音交互方案（阶段 8；阶段 12 CosyVoice；阶段 13 成员声纹）
+# 语音交互方案（阶段 8；阶段 12 CosyVoice；阶段 13 成员声纹；阶段 14 唤醒词）
 
-更新日期：2026-10-28
+更新日期：2026-10-31
 
 ## 1. 策略
 
@@ -24,7 +24,7 @@ SAPI，并支持**参考音频零样本音色克隆**——用户提交自己（
 | 成员声纹 | campplus 声纹识别（复用服务端模型）：注册/比对/陌生人回落，按人记忆与音色 | ✅ 阶段 13（SETUP 文档 §8） |
 | 语音识别 ASR | faster-whisper 本地识别（CPU int8，small 模型） | ✅ 已安装可用（首次运行需下载模型） |
 | 麦克风采集 | sounddevice + 静音检测自动断句 | ✅ 已安装（真实录音需设备在手验证） |
-| 唤醒词 | 未实现 | ⬜ 留给 HA Voice 方案 |
+| 唤醒词 | sherpa-onnx KWS 离线检测（wenetspeech 3.3M int8，约 33 MB，CPU 实测约 50 倍实时） | ✅ 阶段 14（见 §6） |
 
 所有可选依赖均为延迟导入：未安装不影响系统其余功能，并给出可操作的错误提示。
 
@@ -33,6 +33,7 @@ SAPI，并支持**参考音频零样本音色克隆**——用户提交自己（
 ```bash
 python -m butler.voice             # 键盘输入 + 语音播报（无额外依赖要求）
 python -m butler.voice --mic       # 麦克风说话 + 本地识别（已具备依赖）
+python -m butler.voice --mic --wake  # 待机监听唤醒词「小管家」，命中后自动聆听（见 §6）
 python -m butler.voice --wav x.wav --mic   # 识别单个 wav 文件
 python -m butler.voice --no-speak  # 调试：关闭播报
 ```
@@ -64,16 +65,48 @@ ASR（听懂用户） → Agent（理解/生成回复/调用工具，安全确�
 识别不出 → 陌生人回落（只看共享记忆）。**声纹不是身份验证**，设备确认流程
 不变；声纹向量只存本机。详见 [COSYVOICE_SETUP.md](COSYVOICE_SETUP.md) §8。
 
-## 6. 已知限制
+## 6. 唤醒词（阶段 14）
+
+`--mic --wake`（或 .env `WAKEWORD_ENABLED=1`）后，语音模式从"按键说话"升级为
+**待机监听**：说「小管家」→ 提示音 → 自动聆听指令 → 走既有识别/Agent/确认/播报
+链路 → 回落待机。默认关闭，`--mic` 原行为不变。
+
+**实现**：sherpa-onnx KeywordSpotter（k2-fsa，Apache-2.0）+ 官方中文 KWS 模型
+（wenetspeech 10000 小时数据训练，zipformer 3.3M 参数，int8 量化约 33 MB），
+完全离线，CPU 实测约 50 倍实时（树莓派 4 可实时运行）。整轮监听期间不录音存盘，
+只有唤醒后的指令才走既有录音→识别流程。
+
+**启用（一次性）**：
+
+```bash
+pip install sherpa-onnx
+python scripts/wakeword_download_model.bat   # 或 python scripts/wakeword_download_model.py
+# .env 设 WAKEWORD_ENABLED=1（或每次加 --wake）
+```
+
+**换/加唤醒词**：编辑 `data/models/sherpa-kws/keywords.txt`，每行格式为
+"声母+带调韵母 + @显示标签"，如 `x iǎo g uǎn j iā @小管家`（模型自带 8 个
+示例词在 keywords_examples.txt，默认不生效以防误唤醒）。改完重启语音模式即可，
+无需训练模型。
+
+**配置**：`WAKE_WORD`（显示文案）、`WAKEWORD_THRESHOLD`（0.25 默认；漏唤醒调低、
+误唤醒调高）、`WAKEWORD_MODEL_DIR`。依赖或模型缺失时启动自动退回免唤醒模式
+（打印修复指引），绝不因此拒绝启动。
+
+**安全边界不变**：唤醒词只决定"何时开始聆听"，不参与任何权限判断——控制类
+操作照常走确认制，声纹/审计/预算机制与文本模式完全一致。
+
+## 7. 已知限制
 
 - 麦克风录音的噪声环境表现未做真实调试验证（当前机器无人在旁），`--mic` 首次
   运行会下载 whisper 模型（数百 MB，走代理可能较慢）。
-- 无唤醒词：按回车后开始说话的"按键说话"模式。
+- 唤醒词为近距离单麦克风检测，远场/嘈杂环境命中率未实测；KWS 模型为通用中文
+  语音训练，无本项目专属唤醒词的专项调优（可用 `WAKEWORD_THRESHOLD` 平衡）。
 - 中文识别依赖 whisper small 模型，嘈杂环境准确率有限。
 - CosyVoice 为非流式合成（第一版策略：先稳定正确，流式见官方接口后续评估）。
 - 克隆音色的相似度取决于参考录音质量（安静环境、5~15 秒、参考文本逐字准确）。
 
-## 7. 演进路线（HA Voice / Wyoming）
+## 8. 演进路线（HA Voice / Wyoming）
 
 1. 部署 Home Assistant 后，安装官方 **Wyoming** 集成与语音服务
    （whisper / piper / openWakeWord 均为官方支持的服务）。
