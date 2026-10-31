@@ -14,6 +14,7 @@ ESP32 烧录差一步用户操作（见 docs/ROADMAP.md「近期待办」）。
 - 开源复用记录：[docs/OPEN_SOURCE_REUSE.md](docs/OPEN_SOURCE_REUSE.md)
 - 运行维护手册：[docs/RUNBOOK.md](docs/RUNBOOK.md)
 - 硬件接入：[docs/HARDWARE.md](docs/HARDWARE.md) ｜ 语音：[docs/VOICE.md](docs/VOICE.md)
+- 树莓派部署：[docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md)（选型/烧录/一键脚本/迁移/验证）
 - 路线图：[docs/ROADMAP.md](docs/ROADMAP.md)
 
 ## 能做什么
