@@ -18,6 +18,9 @@ data/
 # 备份（含数据库与本地配置的 zip，绝不提交）
 backups/
 
+# Home Assistant 运行时数据（含 .storage 认证凭据与令牌，绝不提交）
+ha_data/
+
 # CosyVoice 本地部署（官方仓库克隆、隔离虚拟环境、模型权重、生成缓存——绝不提交）
 cosyvoice/
 
