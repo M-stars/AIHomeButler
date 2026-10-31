@@ -1,11 +1,13 @@
-"""主动服务（阶段 7）：确定性规则引擎 + 通知，绝不自动控制设备。
+"""主动服务（阶段 7 + 定时提醒扩展）：确定性规则引擎 + 通知，绝不自动控制设备。
 
 设计要点（对应需求 4.7 / 阶段 7 验收）：
-  - 只实现"纯通知"级别的主动服务；"已授权自动化控制设备"留待 HA 自动化承担，
-    本模块不提供任何设备控制动作（安全边界：规则引擎根本没有执行器句柄）；
-  - 区分确定性规则与模型推断：阈值/离线判断全部是确定性比较，无 LLM 参与；
+  - 只实现"纯通知"级别的主动服务；"已授权自动化控制设备"由例行任务模块
+    （routines.py，预授权 + 审计）承担，本模块不提供任何设备控制动作
+    （安全边界：规则引擎根本没有执行器句柄）；
+  - 区分确定性规则与模型推断：阈值/离线/定时判断全部是确定性比较，无 LLM 参与；
   - 防霸屏：每条规则独立冷却期（默认 300s）+ 阈值规则要求连续 N 次检查命中
     （默认 2 次），单次异常数据不会触发；所有检查路径（含异常路径）都受冷却约束；
+    schedule 类规则以"每天至多触发一次"（last_fired_at 日期守卫）替代冷却期；
   - 规则可查看、创建、启停（创建/启停需用户确认，MEDIUM 风险）；
     创建时校验设备存在且能提供对应数据，杜绝"静默永不触发"的规则。
 """
@@ -14,6 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from .devices.base import DeviceError, DeviceNotFound, TYPE_SENSOR
@@ -24,6 +27,7 @@ _log = logging.getLogger("butler.proactive")
 
 _DEFAULT_CONSECUTIVE = 2
 _DEFAULT_COOLDOWN_SECONDS = 300
+_DEFAULT_CATCHUP_MINUTES = 30
 # 每个逻辑指标对应多个候选状态键：模拟后端返回 temperature_c/humidity_percent，
 # HA 适配器（HaSensor）返回通用 value+unit。按序取第一个数值型命中，
 # 避免规则在某一后端下静默失效（P0 修复：原实现只认单一键名）。
@@ -40,6 +44,70 @@ _OPERATORS = {
     "<=": lambda a, b: a <= b,
 }
 
+# ---------------------------------------------------------------- 定时计划共用工具
+
+_DAY_PRESETS = {
+    "daily": [0, 1, 2, 3, 4, 5, 6],
+    "weekdays": [0, 1, 2, 3, 4],
+    "weekend": [5, 6],
+}
+
+
+def normalize_days(days) -> List[int]:
+    """把 daily/weekdays/weekend 或 0-6 整数列表归一化为排重的星期列表（0=周一）。
+
+    输入来自用户/模型的工具参数，非法值抛 DeviceError（可读、可直达确认界面）。
+    """
+    if isinstance(days, str):
+        preset = _DAY_PRESETS.get(days.strip().lower())
+        if preset is None:
+            raise DeviceError("days 需要是 daily/weekdays/weekend 或 0-6 的整数列表（0=周一）")
+        return list(preset)
+    if isinstance(days, list) and days:
+        normalized = []
+        for day in days:
+            if isinstance(day, bool) or not isinstance(day, int) or not 0 <= day <= 6:
+                raise DeviceError("days 需要是 daily/weekdays/weekend 或 0-6 的整数列表（0=周一）")
+            normalized.append(int(day))
+        return sorted(set(normalized))
+    raise DeviceError("days 需要是 daily/weekdays/weekend 或 0-6 的整数列表（0=周一）")
+
+
+def _parse_hhmm(value) -> Optional[int]:
+    """解析 HH:MM 为当日分钟数；非法返回 None。"""
+    if not isinstance(value, str) or ":" not in value:
+        return None
+    try:
+        hour, minute = (int(part) for part in value.strip().split(":"))
+    except ValueError:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour * 60 + minute
+
+
+def schedule_due(schedule: Dict[str, Any], last_fired_at: Optional[str], now: datetime) -> bool:
+    """给定的 time(HH:MM) + days([0-6]) 计划此刻是否该触发。
+
+    触发窗口：目标时刻起 catchup_minutes（默认 30）内都算"到点"——
+    管家进程在整点附近重启/宕机时提醒会补跑，而不是当天永远错过；
+    last_fired_at 的日期等于今天则不再触发（每天至多一次，重启安全）。
+    """
+    target = _parse_hhmm(schedule.get("time"))
+    days = schedule.get("days")
+    if target is None or not isinstance(days, list) or not days:
+        return False
+    if now.weekday() not in days:
+        return False
+    if (last_fired_at or "")[:10] == now.date().isoformat():
+        return False
+    now_minutes = now.hour * 60 + now.minute
+    try:
+        catchup = int(schedule.get("catchup_minutes", _DEFAULT_CATCHUP_MINUTES))
+    except (TypeError, ValueError):
+        catchup = _DEFAULT_CATCHUP_MINUTES
+    return target <= now_minutes <= target + max(0, catchup)
+
 
 class RuleEngine:
     def __init__(
@@ -47,11 +115,13 @@ class RuleEngine:
         device_registry: DeviceRegistry,
         memory_store: MemoryStore,
         clock: Callable[[], float] = time.monotonic,
+        now_fn: Callable[[], datetime] = datetime.now,
         logger: logging.Logger = None,
     ) -> None:
         self._devices = device_registry
         self._store = memory_store
         self._clock = clock
+        self._now_fn = now_fn
         # 规则内存态：连续命中计数（不落库，重启后重新累计是安全默认）
         self._streaks: Dict[int, int] = {}
         self._last_fire_monotonic: Dict[int, float] = {}
@@ -104,7 +174,36 @@ class RuleEngine:
             return self._eval_threshold(rule)
         if rule["kind"] == "device_offline":
             return self._eval_offline(rule)
+        if rule["kind"] == "schedule":
+            return self._eval_schedule(rule)
         return None
+
+    def _eval_schedule(self, rule: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """定时提醒：到点（含补跑窗口）触发一次；last_fired_at 充当每日守卫。
+
+        参数非法（时间/星期不合法）时静默跳过并记日志，与 threshold 的
+        "参数不完整" 处理一致。
+        """
+        params = rule["params"]
+        try:
+            days = params.get("days")
+            if not _parse_hhmm(params.get("time")) or not isinstance(days, list) or not days:
+                self._log.warning("规则 %s(%s) schedule 参数不完整，跳过", rule["id"], rule["name"])
+                return None
+        except Exception:
+            self._log.exception("规则 %s(%s) schedule 参数异常", rule["id"], rule["name"])
+            return None
+        now = self._now_fn()
+        if not schedule_due(params, rule.get("last_fired_at"), now):
+            return None
+        member = params.get("member")
+        message = params.get("message") or rule["name"]
+        prefix = f"{member}，" if member else ""
+        return self._fire(
+            rule,
+            f"【{rule['name']}】现在 {params.get('time')}。{prefix}{message}",
+            level=params.get("level", "info"),
+        )
 
     def _eval_threshold(self, rule: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         params = rule["params"]
@@ -248,6 +347,19 @@ def build_proactive_tools(
         )
         return {"rule_id": rule_id, "created": True}
 
+    def _create_schedule_rule(args: Dict) -> Dict:
+        if not _parse_hhmm(args.get("time")):
+            raise DeviceError("time 需要是 24 小时制的 HH:MM（如 08:00）")
+        params: Dict[str, Any] = {
+            "time": args["time"].strip(),
+            "days": normalize_days(args.get("days", "daily")),
+        }
+        for key in ("member", "message", "level", "catchup_minutes"):
+            if args.get(key) is not None:
+                params[key] = args[key]
+        rule_id = memory_store.add_rule(name=args["name"], kind="schedule", params=params)
+        return {"rule_id": rule_id, "created": True}
+
     def _set_rule_enabled(args: Dict) -> Dict:
         updated = memory_store.set_rule_enabled(args["rule_id"], bool(args["enabled"]))
         if not updated:
@@ -322,6 +434,39 @@ def build_proactive_tools(
             },
             risk=RISK_MEDIUM,
             handler=_create_offline_rule,
+            timeout_seconds=5.0,
+        ),
+        ToolSpec(
+            name="create_schedule_rule",
+            description=(
+                "创建定时提醒规则（纯通知，到点提醒，不会自动控制任何设备）。"
+                "例如：每天 08:00 提醒爷爷量血压；工作日 07:20 提醒小星出门上学。"
+                "member 填家庭成员称呼可定向提醒。需用户确认。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "规则名，如：爷爷量血压提醒"},
+                    "time": {"type": "string", "description": "24 小时制 HH:MM 本地时间，如 08:00"},
+                    "days": {
+                        "description": (
+                            "星期几：daily / weekdays / weekend，或 0-6 整数列表"
+                            "（0=周一…6=周日）；不传=每天"
+                        ),
+                    },
+                    "member": {"type": "string", "description": "可选：定向提醒哪位家庭成员的称呼"},
+                    "message": {"type": "string", "description": "可选：提醒内容，默认用规则名"},
+                    "level": {"type": "string", "enum": ["info", "warning"]},
+                    "catchup_minutes": {
+                        "type": "integer", "minimum": 0, "maximum": 720,
+                        "description": "错过触发时刻的补跑窗口分钟数，默认 30",
+                    },
+                },
+                "required": ["name", "time"],
+                "additionalProperties": False,
+            },
+            risk=RISK_MEDIUM,
+            handler=_create_schedule_rule,
             timeout_seconds=5.0,
         ),
         ToolSpec(

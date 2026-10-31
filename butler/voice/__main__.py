@@ -147,7 +147,7 @@ def main() -> int:
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
-    agent, rule_engine, _executor = _build_agent(
+    agent, rule_engine, _executor, _routine_runner = _build_agent(
         config, registry, memory_store,
         member_context=identity.context if identity else None,
     )

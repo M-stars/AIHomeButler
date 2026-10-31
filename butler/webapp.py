@@ -308,6 +308,66 @@ def create_app(
     def audit(limit: int = 100):
         return {"audit": memory_store.list_audit(limit=limit)}
 
+    # ---- 例行任务：预授权的定时设备动作（创建即授权，执行留审计）----
+
+    @app.get("/api/routines")
+    def routines_list():
+        return {"routines": memory_store.list_routines()}
+
+    @app.post("/api/routines")
+    def routines_create(body: dict):
+        from .proactive import normalize_days, _parse_hhmm
+        from .routines import _MAX_ACTIONS, validate_step
+
+        name = body.get("name")
+        actions = body.get("actions")
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=400, detail="name 不能为空")
+        if _parse_hhmm(body.get("time")) is None:
+            raise HTTPException(status_code=400, detail="time 需要是 24 小时制 HH:MM（如 07:00）")
+        if not isinstance(actions, list) or not actions:
+            raise HTTPException(status_code=400, detail="actions 需要至少一个动作")
+        if len(actions) > _MAX_ACTIONS:
+            raise HTTPException(status_code=400, detail=f"单个例行任务最多 {_MAX_ACTIONS} 个动作")
+        try:
+            days = normalize_days(body.get("days", "daily"))
+            validated = [validate_step(registry, step) for step in actions]
+        except (ValueError, DeviceError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        schedule: Dict[str, Any] = {"time": body["time"].strip(), "days": days}
+        if body.get("catchup_minutes") is not None:
+            schedule["catchup_minutes"] = body["catchup_minutes"]
+        routine_id = memory_store.add_routine(
+            name=name.strip(),
+            schedule=schedule,
+            actions=actions,
+            notify_on_success=bool(body.get("notify_on_success", False)),
+        )
+        memory_store.add_audit(
+            action="routine_create",
+            detail=f"#{routine_id} {name.strip()}（{len(actions)} 步，已逐动作预检）",
+            status="ok",
+        )
+        return {"routine_id": routine_id, "created": True, "steps": validated}
+
+    @app.delete("/api/routines/{routine_id}")
+    def routines_delete(routine_id: int):
+        if not memory_store.delete_routine(routine_id):
+            raise HTTPException(status_code=404, detail="例行任务不存在")
+        memory_store.add_audit(action="routine_delete", detail=f"#{routine_id}", status="ok")
+        return {"routine_id": routine_id, "deleted": True}
+
+    @app.post("/api/routines/{routine_id}/toggle")
+    def routines_toggle(routine_id: int):
+        current = next(
+            (r for r in memory_store.list_routines() if r["id"] == routine_id), None
+        )
+        if current is None:
+            raise HTTPException(status_code=404, detail="例行任务不存在")
+        enabled = not current["enabled"]
+        memory_store.set_routine_enabled(routine_id, enabled)
+        return {"routine_id": routine_id, "enabled": enabled}
+
     # ---- 语音：状态 / 音色库 / 合成（阶段 12，voice_stack 未装配时全部 503）----
 
     def _require_voice_stack():
@@ -547,7 +607,7 @@ def build_web_app(config) -> FastAPI:
     confirmer = WebConfirmer()
     voice_stack = build_tts_stack(config)
     speaker_identity = build_speaker_identity(config, voice_stack.client)
-    agent, rule_engine, executor = _build_agent(
+    agent, rule_engine, executor, routine_runner = _build_agent(
         config, registry, memory_store, confirmer=confirmer,
         member_context=speaker_identity.context,
     )
@@ -556,11 +616,13 @@ def build_web_app(config) -> FastAPI:
     # （避免"对话刚开的灯"与"任务里的开灯"绕过彼此的重复执行保护）
     planner = PlanRunner.for_cli(config, registry, memory_store, executor=executor)
 
-    # 后台主动检查：不依赖前端轮询，通知落库后由页面定时刷新呈现
+    # 后台主动检查：不依赖前端轮询，通知落库后由页面定时刷新呈现；
+    # extra_tick 挂例行任务执行器——到点自动执行预授权动作，结果同样落库
     scheduler = RuleScheduler(
         rule_engine,
         interval_seconds=config.proactive_check_interval_seconds,
         sink=None,
+        extra_tick=routine_runner.run_due,
     )
     scheduler.start()
 

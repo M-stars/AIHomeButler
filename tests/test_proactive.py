@@ -307,3 +307,97 @@ def test_rule_tools_require_confirmation(tmp_path):
 
     result = approve_executor.execute("list_rules", "{}")
     assert result.status == "ok" and result.data["count"] == 1
+
+
+# ---------------------------------------------------------------- 定时提醒（schedule）
+
+from datetime import date, datetime
+
+
+def _schedule_engine(mem, now_dt):
+    """schedule 规则不需要设备；now_fn 注入固定时间做确定性断言。"""
+    from butler.devices.registry import DeviceRegistry
+
+    registry = DeviceRegistry()
+    return RuleEngine(registry, mem, now_fn=lambda: now_dt)
+
+
+# 2026-10-31 是周六；动态取 weekday 避免硬编码星期数
+_TARGET_DAY = date(2026, 10, 31).weekday()
+
+
+def test_schedule_rule_fires_once_per_day_and_across_restart(mem):
+    mem.add_rule("早晨提醒", "schedule", {
+        "time": "08:00", "days": [_TARGET_DAY, (_TARGET_DAY + 1) % 7], "message": "该起床了",
+    })
+    fired = _schedule_engine(mem, datetime(2026, 10, 31, 8, 0)).run_checks()
+    assert len(fired) == 1
+    assert "08:00" in fired[0]["message"] and "该起床了" in fired[0]["message"]
+    # 同日重复检查不触发
+    assert _schedule_engine(mem, datetime(2026, 10, 31, 8, 1)).run_checks() == []
+    # 新引擎实例（模拟重启）同日也不触发：last_fired_at 已持久化
+    assert _schedule_engine(mem, datetime(2026, 10, 31, 8, 5)).run_checks() == []
+    # 次日同一时刻重新触发
+    next_day = _schedule_engine(mem, datetime(2026, 11, 1, 8, 0)).run_checks()
+    assert len(next_day) == 1
+
+
+def test_schedule_rule_respects_days(mem):
+    other_day = (_TARGET_DAY + 1) % 7
+    mem.add_rule("别的日子", "schedule", {"time": "08:00", "days": [other_day]})
+    assert _schedule_engine(mem, datetime(2026, 10, 31, 8, 0)).run_checks() == []
+
+
+def test_schedule_rule_catchup_window(mem):
+    """到点时管家没在跑：窗口内（默认 30 分钟）补跑，窗口外不补。"""
+    mem.add_rule("补跑", "schedule", {"time": "08:00", "days": [_TARGET_DAY]})
+    fired = _schedule_engine(mem, datetime(2026, 10, 31, 8, 10)).run_checks()
+    assert len(fired) == 1  # 迟到 10 分钟仍在窗口内
+
+
+def test_schedule_rule_outside_catchup_window(mem):
+    mem.add_rule("迟到太久", "schedule", {"time": "08:00", "days": [_TARGET_DAY]})
+    assert _schedule_engine(mem, datetime(2026, 10, 31, 8, 31)).run_checks() == []
+    assert _schedule_engine(mem, datetime(2026, 10, 31, 7, 59)).run_checks() == []
+
+
+def test_schedule_member_directed_message(mem):
+    mem.add_rule("量血压", "schedule", {
+        "time": "09:00", "days": [_TARGET_DAY], "member": "爷爷", "message": "该量血压了",
+    })
+    fired = _schedule_engine(mem, datetime(2026, 10, 31, 9, 0)).run_checks()
+    assert len(fired) == 1
+    assert "爷爷，" in fired[0]["message"] and "该量血压了" in fired[0]["message"]
+
+
+def test_create_schedule_rule_tool(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    registry_tools = ToolRegistry()
+    for spec in build_proactive_tools(store):
+        registry_tools.register(spec)
+    approve_executor = make_executor(registry_tools, AutoApproveConfirmer())
+
+    result = approve_executor.execute(
+        "create_schedule_rule",
+        json.dumps({"name": "上学提醒", "time": "07:20", "days": [0, 1, 2, 3, 4],
+                    "member": "小星", "message": "出门上学啦"}),
+    )
+    assert result.status == "ok"
+    rule = store.list_rules()[0]
+    assert rule["kind"] == "schedule"
+    assert rule["params"]["days"] == [0, 1, 2, 3, 4]
+    assert rule["params"]["member"] == "小星"
+
+    result = approve_executor.execute(
+        "create_schedule_rule",
+        json.dumps({"name": "坏时间", "time": "25:00"}),
+    )
+    assert result.status == "error"
+    assert "HH:MM" in result.message
+
+    result = approve_executor.execute(
+        "create_schedule_rule",
+        json.dumps({"name": "坏星期", "time": "08:00", "days": [7]}),
+    )
+    assert result.status == "error"
+    assert "days" in result.message

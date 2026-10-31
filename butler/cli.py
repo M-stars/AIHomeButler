@@ -99,11 +99,14 @@ def _console_notification_sink(notification: dict) -> None:
     print("你: ", end="", flush=True)
 
 
-def _start_proactive_scheduler(config: ButlerConfig, rule_engine: RuleEngine) -> RuleScheduler:
+def _start_proactive_scheduler(
+    config: ButlerConfig, rule_engine: RuleEngine, routine_runner=None
+) -> RuleScheduler:
     scheduler = RuleScheduler(
         rule_engine,
         interval_seconds=config.proactive_check_interval_seconds,
         sink=_console_notification_sink,
+        extra_tick=routine_runner.run_due if routine_runner is not None else None,
     )
     scheduler.start()
     return scheduler
@@ -142,6 +145,10 @@ def _build_agent(
         tool_registry.register(spec)
     for spec in build_proactive_tools(memory_store, device_registry=registry):
         tool_registry.register(spec)
+    from .routines import RoutineRunner, build_routine_tools
+
+    for spec in build_routine_tools(memory_store, registry):
+        tool_registry.register(spec)
 
     confirmer = confirmer or ConsoleConfirmer()
     executor = ToolExecutor(
@@ -179,7 +186,8 @@ def _build_agent(
         system_prompt_provider=system_prompt_provider,
     )
     rule_engine = RuleEngine(registry, memory_store)
-    return agent, rule_engine, executor
+    routine_runner = RoutineRunner(registry, memory_store)
+    return agent, rule_engine, executor, routine_runner
 
 
 def main() -> int:
@@ -196,8 +204,8 @@ def main() -> int:
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
-    agent, rule_engine, _executor = _build_agent(config, registry, memory_store)
-    _start_proactive_scheduler(config, rule_engine)
+    agent, rule_engine, _executor, routine_runner = _build_agent(config, registry, memory_store)
+    _start_proactive_scheduler(config, rule_engine, routine_runner=routine_runner)
 
     backend_label = (
         f"Home Assistant @ {config.ha_url}"

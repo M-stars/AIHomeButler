@@ -84,6 +84,17 @@ class MemoryStore:
                     day TEXT PRIMARY KEY,
                     used_tokens INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS routines (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    schedule_json TEXT NOT NULL,
+                    actions_json TEXT NOT NULL,
+                    notify_on_success INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_fired_at TEXT,
+                    last_result TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             self._conn.commit()
@@ -94,6 +105,36 @@ class MemoryStore:
                     self._conn.commit()
             except sqlite3.OperationalError:
                 pass
+            # 例行任务迁移：老库的 proactive_rules 用 CHECK 约束锁死了 kind，
+            # 无法存 schedule 类型；SQLite 不能改 CHECK，检测到旧约束时重建表
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='proactive_rules'"
+                ).fetchone()
+            if row and "schedule" not in (row["sql"] or ""):
+                with self._lock:
+                    self._conn.executescript(
+                        """
+                        BEGIN;
+                        CREATE TABLE proactive_rules_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            name TEXT NOT NULL,
+                            kind TEXT NOT NULL CHECK (kind IN ('sensor_threshold', 'device_offline', 'schedule')),
+                            params_json TEXT NOT NULL,
+                            enabled INTEGER NOT NULL DEFAULT 1,
+                            cooldown_seconds INTEGER NOT NULL DEFAULT 300,
+                            state_json TEXT NOT NULL DEFAULT '{}',
+                            last_fired_at TEXT
+                        );
+                        INSERT INTO proactive_rules_new
+                            SELECT id, name, kind, params_json, enabled, cooldown_seconds, state_json, last_fired_at
+                            FROM proactive_rules;
+                        DROP TABLE proactive_rules;
+                        ALTER TABLE proactive_rules_new RENAME TO proactive_rules;
+                        COMMIT;
+                        """
+                    )
+                    self._conn.commit()
 
     # ------------------------------------------------------------- 记忆 CRUD
 
@@ -236,8 +277,8 @@ class MemoryStore:
     # ---------------------------------------------------------- 主动服务规则
 
     def add_rule(self, name: str, kind: str, params: Dict[str, Any], cooldown_seconds: int = 300) -> int:
-        if kind not in ("sensor_threshold", "device_offline"):
-            raise ValueError("规则类型只能是 sensor_threshold / device_offline")
+        if kind not in ("sensor_threshold", "device_offline", "schedule"):
+            raise ValueError("规则类型只能是 sensor_threshold / device_offline / schedule")
         with self._lock:
             cursor = self._conn.execute(
                 "INSERT INTO proactive_rules (name, kind, params_json, enabled, cooldown_seconds)"
@@ -282,6 +323,76 @@ class MemoryStore:
                     _now() if last_fired else None,
                     int(rule_id),
                 ),
+            )
+            self._conn.commit()
+
+    # ------------------------------------------------------------------ 例行任务
+
+    def add_routine(
+        self,
+        name: str,
+        schedule: Dict[str, Any],
+        actions: List[Dict[str, Any]],
+        notify_on_success: bool = False,
+    ) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO routines (name, schedule_json, actions_json, notify_on_success, enabled, last_result, created_at)"
+                " VALUES (?, ?, ?, ?, 1, '', ?)",
+                (
+                    name,
+                    json.dumps(schedule, ensure_ascii=False),
+                    json.dumps(actions, ensure_ascii=False),
+                    1 if notify_on_success else 0,
+                    _now(),
+                ),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
+    def list_routines(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, name, schedule_json, actions_json, notify_on_success, enabled,"
+                " last_fired_at, last_result, created_at"
+                " FROM routines ORDER BY id"
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            for json_col, target in (("schedule_json", "schedule"), ("actions_json", "actions")):
+                try:
+                    item[target] = json.loads(item.pop(json_col))
+                except ValueError:
+                    item[target] = {} if target == "schedule" else []
+            item["notify_on_success"] = bool(item["notify_on_success"])
+            item["enabled"] = bool(item["enabled"])
+            result.append(item)
+        return result
+
+    def delete_routine(self, routine_id: int) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM routines WHERE id = ?", (int(routine_id),)
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def set_routine_enabled(self, routine_id: int, enabled: bool) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE routines SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, int(routine_id)),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_routine_fired(self, routine_id: int, result: str) -> None:
+        """记录执行时间与结果。last_fired_at 同时充当"今天已执行过"的守卫。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE routines SET last_fired_at = ?, last_result = ? WHERE id = ?",
+                (_now(), str(result)[:500], int(routine_id)),
             )
             self._conn.commit()
 
