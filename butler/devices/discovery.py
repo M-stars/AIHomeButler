@@ -19,7 +19,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .base import (
     TYPE_CLIMATE,
@@ -143,11 +143,20 @@ def classify_entities(
     return specs, skipped
 
 
-def build_devices(client: HassClient, specs: List[DeviceSpec]) -> List[Device]:
-    """按能力快照实例化适配器。sensor 无能力快照也照常实例化（只读）。"""
+def build_devices(client: HassClient, specs: List[DeviceSpec],
+                  area_map: Optional[Dict[str, str]] = None) -> List[Device]:
+    """按能力快照实例化适配器。sensor 无能力快照也照常实例化（只读）。
+
+    area_map（阶段 14.6）：HA 区域注册表提供的 entity_id→区域名映射，
+    缺省时区域留空（WebSocket 不可用时的降级形态）。
+    """
+    areas = area_map or {}
     devices: List[Device] = []
     for spec in specs:
-        info = DeviceInfo(id=spec.entity_id, name=spec.name, device_type=spec.device_type, area="")
+        info = DeviceInfo(
+            id=spec.entity_id, name=spec.name, device_type=spec.device_type,
+            area=areas.get(spec.entity_id, ""),
+        )
         adapter_cls = _DOMAIN_ADAPTERS[spec.domain][0]
         if spec.domain == "sensor":
             devices.append(adapter_cls(client, info))
@@ -184,6 +193,8 @@ class DiscoveryRefresher:
     """周期刷新注册表：新设备自动纳入、消失设备自动移出，变更落审计。
 
     HA 不可达/单次失败只记日志，注册表保持上一份可用清单（服务连续性优先）。
+    阶段 14.6：支持 WebSocket 事件触发的即时刷新（refresh_now，去抖合并）
+    与区域归属注入（set_area_provider）。
     """
 
     def __init__(
@@ -193,14 +204,41 @@ class DiscoveryRefresher:
         interval_seconds: float,
         memory_store=None,
         exclusions_path: Optional[Path] = None,
+        debounce_seconds: float = 2.0,
     ) -> None:
         self._client = client
         self._registry = registry
         self._interval = max(60.0, float(interval_seconds))
         self._store = memory_store
         self._exclusions_path = exclusions_path
+        self._debounce = max(0.05, float(debounce_seconds))
+        self._area_provider: Optional[Callable[[], Dict[str, str]]] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._timer: Optional[threading.Timer] = None
+        self._timer_lock = threading.Lock()
+
+    def set_area_provider(self, provider: Callable[[], Dict[str, str]]) -> None:
+        """注入"实体→区域名"映射提供方（HA WebSocket 注册表查询）。"""
+        self._area_provider = provider
+
+    def refresh_now(self) -> None:
+        """外部事件（state_changed）触发的即时刷新；抖动窗口内合并为一次。"""
+        with self._timer_lock:
+            if self._timer is not None:
+                return  # 已有待执行的刷新
+            timer = threading.Timer(self._debounce, self._run_debounced)
+            timer.daemon = True
+            self._timer = timer
+            timer.start()
+
+    def _run_debounced(self) -> None:
+        with self._timer_lock:
+            self._timer = None
+        try:
+            self.refresh_once()
+        except Exception:
+            _log.exception("事件触发的设备刷新失败（保留现有设备清单）")
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -212,6 +250,10 @@ class DiscoveryRefresher:
 
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
+        with self._timer_lock:
+            timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             self._thread = None
@@ -224,6 +266,15 @@ class DiscoveryRefresher:
                 _log.exception("设备自动发现刷新失败（保留现有设备清单）")
             self._stop.wait(self._interval)
 
+    def _current_area_map(self) -> Dict[str, str]:
+        if self._area_provider is None:
+            return {}
+        try:
+            return self._area_provider() or {}
+        except Exception:
+            _log.warning("区域注册表获取失败，本轮以空区域继续", exc_info=True)
+            return {}
+
     def refresh_once(self) -> Dict[str, List[str]]:
         """执行一次发现并与注册表比对；返回 {"added": [...], "removed": [...]}。"""
         exclusions = (
@@ -231,11 +282,25 @@ class DiscoveryRefresher:
         )
         states = self._client.get_states()
         specs, _skipped = classify_entities(states, exclusions)
-        devices = build_devices(self._client, specs)
+        devices = build_devices(self._client, specs, area_map=self._current_area_map())
+        old_devices = self._registry.list()
         new_ids = {d.id for d in devices}
-        old_ids = {d.id for d in self._registry.list()}
+        old_ids = {d.id for d in old_devices}
         added, removed = sorted(new_ids - old_ids), sorted(old_ids - new_ids)
-        if not added and not removed:
+
+        def _sig(devs):
+            # 身份签名 = ID + 区域 + 能力：区域/能力变化也必须触发换血，
+            # 否则 WS 就绪后首次按区域重建会被"无变化"短路（实测踩过）
+            return {
+                d.id: (
+                    d.info.area,
+                    tuple(d.supported_actions())
+                    if callable(getattr(d, "supported_actions", None)) else (),
+                )
+                for d in devs
+            }
+
+        if not added and not removed and _sig(devices) == _sig(old_devices):
             return {"added": [], "removed": []}
         self._registry.replace_all(devices)
         for entity_id in added:

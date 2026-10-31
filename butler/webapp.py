@@ -611,23 +611,41 @@ def build_web_app(config) -> FastAPI:
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
 
-    # 设备自动发现周期刷新（阶段 14.5，仅 HA 后端）：新设备自动纳入、消失自动移出，
-    # 变更落审计；HA 不可达时保留现有清单。daemon 线程，进程退出即结束。
+    # 设备自动发现（阶段 14.5/14.6，仅 HA 后端）：周期刷新兜底 + WebSocket 事件
+    # 即时触发（state_changed → 去抖刷新），区域归属来自 WS 注册表查询。
+    # 全部 daemon 线程，任一环失败只降级（无区域/退回周期刷新），不影响主流程。
     if (
         getattr(config, "device_backend", "") == "homeassistant"
         and getattr(config, "discovery_enabled", True)
-        and getattr(config, "discovery_refresh_seconds", 0) > 0
     ):
         from .devices.discovery import DiscoveryRefresher
         from .devices.homeassistant import get_ha_client
 
-        DiscoveryRefresher(
+        refresher = DiscoveryRefresher(
             get_ha_client(config),
             registry,
-            interval_seconds=config.discovery_refresh_seconds,
+            interval_seconds=getattr(config, "discovery_refresh_seconds", 300),
             memory_store=memory_store,
             exclusions_path=config.data_dir / "discovery_exclusions.json",
-        ).start()
+        )
+        refresher.start()
+        if getattr(config, "discovery_refresh_seconds", 300) <= 0:
+            pass  # 用户显式关掉周期刷新：仅 WS 事件触发
+        try:
+            from .devices.ha_ws import HaWebSocket
+
+            ws_client = HaWebSocket(
+                config, on_state_changed=lambda _data: refresher.refresh_now()
+            )
+            ws_client.start()
+            if ws_client.wait_ready(8.0):
+                refresher.set_area_provider(ws_client.fetch_area_map)
+                refresher.refresh_now()  # 连接即按区域重建一次设备清单
+                _log.info("HA WebSocket 就绪：区域信息与新设备即时感知已启用")
+            else:
+                _log.warning("HA WebSocket 未就绪：区域为空，新设备感知退回周期刷新")
+        except Exception:
+            _log.exception("HA WebSocket 启动失败（退回周期刷新，不影响其他功能）")
 
     confirmer = WebConfirmer()
     voice_stack = build_tts_stack(config)

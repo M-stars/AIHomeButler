@@ -7,6 +7,8 @@ uvicorn>=0.29.0
 pydantic>=2.5.0
 # Web 音色库上传（POST /api/voices multipart 表单）需要
 python-multipart>=0.0.9
+# HA WebSocket（阶段 14.6：状态变更订阅/区域注册表；未安装时自动退回周期刷新）
+websocket-client>=1.6
 
 # 语音（可选：不装则语音模式自动降级，见 docs/VOICE.md）
 # pyttsx3>=2.90

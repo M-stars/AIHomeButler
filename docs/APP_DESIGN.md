@@ -125,8 +125,9 @@ GET /api/devices/{device_id}/state      单设备状态（面板刷新用，替�
 
 ### 5.2 设备面板（需求 2）
 
-- 数据源即动态能力：`/api/overview` 每台设备带 `actions` 清单（阶段 14.5 自动发现从
-  HA 能力位标志推导，新设备进网即出现），应用**按 actions 渲染控件**而非按类型写死——
+- 数据源即动态能力：`/api/overview` 每台设备带 `actions` 清单与 `area` 区域归属
+  （阶段 14.5 自动发现从 HA 能力位标志推导 + 14.6 WebSocket 注册表查询，新设备
+  进网秒级出现），应用**按 actions 渲染控件、按 area 分组**而非写死——
   开关=切换、灯有 set_brightness=亮度滑条、窗帘有 set_position=位置滑条+开/停/关、
   空调=温度步进器、扫地机=按钮组；
 - 状态轮询 2s（沿用），面板可见时只刷可见设备（/api/devices/{id}/state）。
