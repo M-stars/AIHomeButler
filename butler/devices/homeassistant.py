@@ -23,9 +23,14 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from .base import (
+    TYPE_CLIMATE,
+    TYPE_COVER,
     TYPE_FAN,
+    TYPE_HUMIDIFIER,
     TYPE_LIGHT,
     TYPE_SENSOR,
+    TYPE_SWITCH,
+    TYPE_VACUUM,
     ControllableDevice,
     Device,
     DeviceError,
@@ -291,7 +296,225 @@ def _percent_to_speed(percentage: int) -> str:
     return "high"
 
 
-_DEVICE_TYPES = {TYPE_SENSOR: HaSensor, TYPE_LIGHT: HaLight, TYPE_FAN: HaFan}
+class HaSwitch(_HaDeviceBase, ControllableDevice):
+    """HA 开关/插座实体：纯开/关。"""
+
+    ACTIONS = ["turn_on", "turn_off"]
+
+    def supported_actions(self) -> List[str]:
+        return list(self.ACTIONS)
+
+    def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        return {"on": raw.get("state") == "on"}
+
+    def apply(self, action: str, value=None) -> Dict[str, Any]:
+        if action == "turn_on":
+            self._client.call_service("switch", "turn_on", self.info.id)
+        elif action == "turn_off":
+            self._client.call_service("switch", "turn_off", self.info.id)
+        else:
+            raise DeviceError(
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+            )
+        return self.read_state()
+
+
+class HaCover(_HaDeviceBase, ControllableDevice):
+    """HA 窗帘/卷帘实体：开/关/停/位置（0-100，100=全开）。
+
+    窗帘动作是异步的（真实窗帘开合需要时间），执行后状态常为
+    opening/closing（进行中）。控制验证语义是"指令已接受并开始移动"，
+    终态用 get_device_state 查询。
+    """
+
+    ACTIONS = ["open", "close", "stop", "set_position"]
+
+    def supported_actions(self) -> List[str]:
+        return list(self.ACTIONS)
+
+    def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        attributes = raw.get("attributes") or {}
+        position_raw = attributes.get("current_position")
+        try:
+            position: Optional[int] = max(0, min(100, int(position_raw)))
+        except (TypeError, ValueError):
+            position = None
+        return {
+            "open": raw.get("state") == "open",
+            "position": position,
+            "activity": raw.get("state"),
+        }
+
+    def apply(self, action: str, value=None) -> Dict[str, Any]:
+        if action == "open":
+            self._client.call_service("cover", "open_cover", self.info.id)
+        elif action == "close":
+            self._client.call_service("cover", "close_cover", self.info.id)
+        elif action == "stop":
+            self._client.call_service("cover", "stop_cover", self.info.id)
+        elif action == "set_position":
+            self._client.call_service(
+                "cover", "set_cover_position",
+                self.info.id, {"position": self._to_position(value)},
+            )
+        else:
+            raise DeviceError(
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+            )
+        return self.read_state()
+
+    @staticmethod
+    def _to_position(value) -> int:
+        try:
+            if isinstance(value, bool):
+                raise TypeError
+            number = int(value)
+        except (TypeError, ValueError):
+            raise DeviceError("set_position 需要提供 0-100 的整数（100=全开）") from None
+        if not 0 <= number <= 100:
+            raise DeviceError("set_position 需要提供 0-100 的整数（100=全开）")
+        return number
+
+
+class HaClimate(_HaDeviceBase, ControllableDevice):
+    """HA 空调/温控实体：开关 + 目标温度。
+
+    仅支持单设定点实体（attributes 带 temperature）；heat_cool 双设定点
+    （如 ecobee）回读无法唯一验证目标值，白名单应排除此类实体。
+    """
+
+    ACTIONS = ["turn_on", "turn_off", "set_temperature"]
+
+    def supported_actions(self) -> List[str]:
+        return list(self.ACTIONS)
+
+    def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        attributes = raw.get("attributes") or {}
+        return {
+            "on": raw.get("state") != "off",
+            "hvac_mode": raw.get("state"),
+            "current_temperature": attributes.get("current_temperature"),
+            "temperature": attributes.get("temperature"),
+        }
+
+    def apply(self, action: str, value=None) -> Dict[str, Any]:
+        if action == "turn_on":
+            self._client.call_service("climate", "turn_on", self.info.id)
+        elif action == "turn_off":
+            self._client.call_service("climate", "turn_off", self.info.id)
+        elif action == "set_temperature":
+            self._client.call_service(
+                "climate", "set_temperature",
+                self.info.id, {"temperature": self._to_temperature(value)},
+            )
+        else:
+            raise DeviceError(
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+            )
+        return self.read_state()
+
+    @staticmethod
+    def _to_temperature(value) -> float:
+        try:
+            if isinstance(value, bool):
+                raise TypeError
+            number = float(value)
+        except (TypeError, ValueError):
+            raise DeviceError("set_temperature 需要提供数字温度值（如 26 或 26.5）") from None
+        # 宽区间同时覆盖 °C(16-30) 与 °F(45-95) 实体；设备级越界由 HA 拒绝
+        if not 5 <= number <= 100:
+            raise DeviceError("set_temperature 超出合理范围（5-100）")
+        return number
+
+
+class HaHumidifier(_HaDeviceBase, ControllableDevice):
+    """HA 加湿/除湿器实体：开关 + 目标湿度（0-100）。"""
+
+    ACTIONS = ["turn_on", "turn_off", "set_humidity"]
+
+    def supported_actions(self) -> List[str]:
+        return list(self.ACTIONS)
+
+    def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        attributes = raw.get("attributes") or {}
+        return {
+            "on": raw.get("state") == "on",
+            "humidity": attributes.get("humidity"),
+            "current_humidity": attributes.get("current_humidity"),
+        }
+
+    def apply(self, action: str, value=None) -> Dict[str, Any]:
+        if action == "turn_on":
+            self._client.call_service("humidifier", "turn_on", self.info.id)
+        elif action == "turn_off":
+            self._client.call_service("humidifier", "turn_off", self.info.id)
+        elif action == "set_humidity":
+            self._client.call_service(
+                "humidifier", "set_humidity",
+                self.info.id, {"humidity": self._to_humidity(value)},
+            )
+        else:
+            raise DeviceError(
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+            )
+        return self.read_state()
+
+    @staticmethod
+    def _to_humidity(value) -> int:
+        try:
+            if isinstance(value, bool):
+                raise TypeError
+            number = int(value)
+        except (TypeError, ValueError):
+            raise DeviceError("set_humidity 需要提供 0-100 的整数") from None
+        if not 0 <= number <= 100:
+            raise DeviceError("set_humidity 需要提供 0-100 的整数")
+        return number
+
+
+class HaVacuum(_HaDeviceBase, ControllableDevice):
+    """HA 扫地机器人实体：启动/暂停/停止/回充。"""
+
+    ACTIONS = ["start", "pause", "stop", "return_to_base"]
+    _SERVICES = {
+        "start": "start",
+        "pause": "pause",
+        "stop": "stop",
+        "return_to_base": "return_to_base",
+    }
+
+    def supported_actions(self) -> List[str]:
+        return list(self.ACTIONS)
+
+    def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        attributes = raw.get("attributes") or {}
+        battery_raw = attributes.get("battery_level")
+        try:
+            battery: Optional[int] = int(battery_raw)
+        except (TypeError, ValueError):
+            battery = None
+        return {"status": raw.get("state"), "battery": battery}
+
+    def apply(self, action: str, value=None) -> Dict[str, Any]:
+        service = self._SERVICES.get(action)
+        if service is None:
+            raise DeviceError(
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+            )
+        self._client.call_service("vacuum", service, self.info.id)
+        return self.read_state()
+
+
+_DEVICE_TYPES = {
+    TYPE_SENSOR: HaSensor,
+    TYPE_LIGHT: HaLight,
+    TYPE_FAN: HaFan,
+    TYPE_SWITCH: HaSwitch,
+    TYPE_COVER: HaCover,
+    TYPE_CLIMATE: HaClimate,
+    TYPE_HUMIDIFIER: HaHumidifier,
+    TYPE_VACUUM: HaVacuum,
+}
 
 
 def build_devices_from_spec(client: HassClient, spec: List[Dict[str, Any]]) -> List[Device]:

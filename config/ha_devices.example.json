@@ -1,10 +1,15 @@
 {
-  "_说明": "Home Assistant 设备白名单：只有列在这里的实体才会暴露给 AI。复制为 config/ha_devices.json 后按家中实际实体修改。",
+  "_说明": "Home Assistant 设备白名单：只有列在这里的实体才会暴露给 AI。复制为 config/ha_devices.json 后按家中实际实体修改（实体 ID 可在 HA 开发者工具-状态 或 GET /api/states 查看）。支持 type：sensor / light / fan / switch / cover / climate / humidifier / vacuum。安全边界：门锁(lock)/车库门/热水器(water_heater)/警报器(alarm_control_panel)/警报笛(siren) 一律不要接入（高风险设计禁止）；climate 仅支持单设定点实体（attributes 带 temperature），heat_cool 双设定点无法回读验证，勿接入。",
   "devices": [
     { "entity_id": "sensor.living_room_temp", "name": "客厅温度传感器", "type": "sensor", "area": "客厅" },
     { "entity_id": "sensor.living_room_humidity", "name": "客厅湿度传感器", "type": "sensor", "area": "客厅" },
     { "entity_id": "light.living_room", "name": "客厅灯", "type": "light", "area": "客厅" },
     { "entity_id": "light.bedroom", "name": "卧室灯", "type": "light", "area": "卧室" },
-    { "entity_id": "fan.bedroom", "name": "卧室风扇", "type": "fan", "area": "卧室" }
+    { "entity_id": "fan.bedroom", "name": "卧室风扇", "type": "fan", "area": "卧室" },
+    { "entity_id": "switch.plug", "name": "客厅插座", "type": "switch", "area": "客厅" },
+    { "entity_id": "cover.living_room", "name": "客厅窗帘", "type": "cover", "area": "客厅" },
+    { "entity_id": "climate.living_room", "name": "客厅空调", "type": "climate", "area": "客厅" },
+    { "entity_id": "humidifier.bedroom", "name": "卧室加湿器", "type": "humidifier", "area": "卧室" },
+    { "entity_id": "vacuum.living_room", "name": "扫地机器人", "type": "vacuum", "area": "客厅" }
   ]
 }

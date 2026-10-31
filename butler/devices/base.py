@@ -12,6 +12,11 @@ from typing import Dict, List
 TYPE_SENSOR = "sensor"
 TYPE_LIGHT = "light"
 TYPE_FAN = "fan"
+TYPE_SWITCH = "switch"
+TYPE_COVER = "cover"
+TYPE_CLIMATE = "climate"
+TYPE_HUMIDIFIER = "humidifier"
+TYPE_VACUUM = "vacuum"
 
 
 class DeviceError(Exception):

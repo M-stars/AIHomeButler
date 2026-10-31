@@ -67,6 +67,54 @@ def _default_entities() -> Dict[str, Dict[str, Any]]:
             "last_updated": _now_iso(),
             "last_changed": _now_iso(),
         },
+        "switch.plug": {
+            "entity_id": "switch.plug",
+            "state": "off",
+            "attributes": {"friendly_name": "客厅插座"},
+            "last_updated": _now_iso(),
+            "last_changed": _now_iso(),
+        },
+        "cover.living_room": {
+            "entity_id": "cover.living_room",
+            "state": "closed",
+            "attributes": {"friendly_name": "客厅窗帘", "current_position": 0},
+            "last_updated": _now_iso(),
+            "last_changed": _now_iso(),
+        },
+        "climate.living_room": {
+            "entity_id": "climate.living_room",
+            "state": "cool",
+            "attributes": {
+                "friendly_name": "客厅空调",
+                "temperature": 26.0,
+                "current_temperature": 27.5,
+                "min_temp": 16,
+                "max_temp": 32,
+                "hvac_modes": ["off", "cool", "heat", "auto"],
+            },
+            "last_updated": _now_iso(),
+            "last_changed": _now_iso(),
+        },
+        "humidifier.bedroom": {
+            "entity_id": "humidifier.bedroom",
+            "state": "on",
+            "attributes": {
+                "friendly_name": "卧室加湿器",
+                "humidity": 60,
+                "current_humidity": 45,
+                "min_humidity": 10,
+                "max_humidity": 80,
+            },
+            "last_updated": _now_iso(),
+            "last_changed": _now_iso(),
+        },
+        "vacuum.living_room": {
+            "entity_id": "vacuum.living_room",
+            "state": "docked",
+            "attributes": {"friendly_name": "扫地机器人", "battery_level": 88},
+            "last_updated": _now_iso(),
+            "last_changed": _now_iso(),
+        },
     }
 
 
@@ -130,7 +178,8 @@ def create_emulator_app(
         return results
 
     def _apply_service(entities, entity, domain, service, data) -> None:
-        # 与真实 HA 行为对齐的最小实现
+        # 与真实 HA 行为对齐的最小实现（窗帘/扫地机器人按同步终态简化，
+        # 真实 HA 的异步过渡由集成测试对真实实例验证）
         if domain == "light":
             if service == "turn_on":
                 entity["state"] = "on"
@@ -145,6 +194,50 @@ def create_emulator_app(
                     entity["attributes"]["percentage"] = int(data["percentage"])
             elif service == "turn_off":
                 entity["state"] = "off"
+        elif domain == "switch":
+            if service == "turn_on":
+                entity["state"] = "on"
+            elif service == "turn_off":
+                entity["state"] = "off"
+        elif domain == "cover":
+            if service == "open_cover":
+                entity["state"] = "open"
+                entity["attributes"]["current_position"] = 100
+            elif service == "close_cover":
+                entity["state"] = "closed"
+                entity["attributes"]["current_position"] = 0
+            elif service == "stop_cover":
+                pass  # 保持当前状态
+            elif service == "set_cover_position":
+                position = int(data["position"])
+                entity["attributes"]["current_position"] = position
+                entity["state"] = "open" if position > 0 else "closed"
+        elif domain == "climate":
+            if service == "turn_on":
+                if entity["state"] == "off":
+                    entity["state"] = "cool"
+            elif service == "turn_off":
+                entity["state"] = "off"
+            elif service == "set_temperature":
+                entity["attributes"]["temperature"] = float(data["temperature"])
+            elif service == "set_hvac_mode":
+                entity["state"] = str(data["hvac_mode"])
+        elif domain == "humidifier":
+            if service == "turn_on":
+                entity["state"] = "on"
+            elif service == "turn_off":
+                entity["state"] = "off"
+            elif service == "set_humidity":
+                entity["attributes"]["humidity"] = int(data["humidity"])
+        elif domain == "vacuum":
+            if service == "start":
+                entity["state"] = "cleaning"
+            elif service == "pause":
+                entity["state"] = "paused"
+            elif service == "stop":
+                entity["state"] = "idle"
+            elif service == "return_to_base":
+                entity["state"] = "returning"
         # 未知 domain/service：真实 HA 会返回 404/400，这里同样拒绝
         else:
             raise HTTPException(status_code=404, detail="Service not found.")

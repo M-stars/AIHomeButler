@@ -9,6 +9,7 @@ import pytest
 import uvicorn
 
 from butler.devices.base import (
+    DeviceError,
     DeviceNotFound,
     DeviceOffline,
     StateUnknownError,
@@ -23,6 +24,7 @@ from butler.devices.homeassistant import (
     build_ha_registry,
 )
 from butler.emulator.ha import create_emulator_app
+from butler.tools.home import _action_took_effect
 
 
 def _free_port() -> int:
@@ -104,6 +106,123 @@ def test_fan_speed_roundtrip(registry):
     assert fan.read_state()["speed"] == "low"
     fan.apply("turn_off")
     assert fan.read_state()["on"] is False
+
+
+@pytest.fixture
+def extended_registry(client):
+    from butler.devices.registry import DeviceRegistry
+
+    devices = build_devices_from_spec(
+        client,
+        [
+            {"entity_id": "switch.plug", "name": "客厅插座", "type": "switch", "area": "客厅"},
+            {"entity_id": "cover.living_room", "name": "客厅窗帘", "type": "cover", "area": "客厅"},
+            {"entity_id": "climate.living_room", "name": "客厅空调", "type": "climate", "area": "客厅"},
+            {"entity_id": "humidifier.bedroom", "name": "卧室加湿器", "type": "humidifier", "area": "卧室"},
+            {"entity_id": "vacuum.living_room", "name": "扫地机器人", "type": "vacuum", "area": "客厅"},
+        ],
+    )
+    reg = DeviceRegistry()
+    for device in devices:
+        reg.register(device)
+    return reg
+
+
+def test_switch_roundtrip(extended_registry):
+    plug = extended_registry.get("switch.plug")
+    assert plug.read_state() == {"on": False}
+    plug.apply("turn_on")
+    assert plug.read_state() == {"on": True}
+    plug.apply("turn_off")
+    assert plug.read_state() == {"on": False}
+
+
+def test_cover_roundtrip(extended_registry):
+    cover = extended_registry.get("cover.living_room")
+    assert cover.read_state()["open"] is False
+    state = cover.apply("open")
+    assert state["open"] is True and state["position"] == 100
+    state = cover.apply("set_position", 40)
+    assert state["position"] == 40 and state["open"] is True
+    state = cover.apply("close")
+    assert state["open"] is False and state["position"] == 0
+    cover.apply("stop")  # 已关：stop 保持现状不报错
+    assert cover.read_state()["open"] is False
+
+
+def test_climate_roundtrip(extended_registry):
+    ac = extended_registry.get("climate.living_room")
+    state = ac.read_state()
+    assert state["on"] is True and state["hvac_mode"] == "cool"
+    assert state["temperature"] == 26.0 and state["current_temperature"] == 27.5
+    state = ac.apply("set_temperature", 24.5)
+    assert state["temperature"] == 24.5
+    ac.apply("turn_off")
+    state = ac.read_state()
+    assert state["on"] is False and state["hvac_mode"] == "off"
+    ac.apply("turn_on")
+    assert ac.read_state()["on"] is True
+    # 复原为初始 cool/26 开机态
+    ac._client.call_service("climate", "set_hvac_mode", ac.info.id, {"hvac_mode": "cool"})
+    ac.apply("set_temperature", 26.0)
+
+
+def test_humidifier_roundtrip(extended_registry):
+    humidifier = extended_registry.get("humidifier.bedroom")
+    state = humidifier.read_state()
+    assert state["on"] is True and state["humidity"] == 60 and state["current_humidity"] == 45
+    state = humidifier.apply("set_humidity", 70)
+    assert state["humidity"] == 70
+    humidifier.apply("turn_off")
+    assert humidifier.read_state()["on"] is False
+    humidifier.apply("turn_on")
+    humidifier.apply("set_humidity", 60)  # 复原
+
+
+def test_vacuum_roundtrip(extended_registry):
+    vacuum = extended_registry.get("vacuum.living_room")
+    state = vacuum.read_state()
+    assert state["status"] == "docked" and state["battery"] == 88
+    assert vacuum.apply("start")["status"] == "cleaning"
+    assert vacuum.apply("pause")["status"] == "paused"
+    assert vacuum.apply("stop")["status"] == "idle"
+    assert vacuum.apply("return_to_base")["status"] == "returning"
+    vacuum._client.call_service("vacuum", "stop", vacuum.info.id)  # 复原为 idle（demo 语义）
+    # 真实 HA 的 stop 落到 idle/docked 均在验证白名单内
+    assert vacuum.read_state()["status"] in ("idle", "docked")
+
+
+def test_new_devices_invalid_values_rejected(extended_registry):
+    cover = extended_registry.get("cover.living_room")
+    ac = extended_registry.get("climate.living_room")
+    humidifier = extended_registry.get("humidifier.bedroom")
+    with pytest.raises(DeviceError):
+        cover.apply("set_position", 101)
+    with pytest.raises(DeviceError):
+        cover.apply("set_position", "half")
+    with pytest.raises(DeviceError):
+        ac.apply("set_temperature", "warm")
+    with pytest.raises(DeviceError):
+        ac.apply("set_temperature", 200)
+    with pytest.raises(DeviceError):
+        humidifier.apply("set_humidity", -1)
+
+
+def test_cover_climate_verification_semantics():
+    """工具层回读验证：窗帘进行中算成功、扫地机器人状态集、温度容差比较。"""
+    assert _action_took_effect("open", None, {"open": True, "position": 100, "activity": "open"})
+    assert _action_took_effect("open", None, {"open": False, "position": 30, "activity": "opening"})
+    assert not _action_took_effect("open", None, {"open": False, "position": 0, "activity": "closed"})
+    assert _action_took_effect("close", None, {"open": False, "position": 0, "activity": "closing"})
+    assert _action_took_effect("set_position", 40, {"open": True, "position": 40, "activity": "open"})
+    assert not _action_took_effect("set_position", 40, {"open": True, "position": 55, "activity": "open"})
+    assert _action_took_effect("start", None, {"status": "cleaning", "battery": 80})
+    assert _action_took_effect("stop", None, {"status": "idle", "battery": 80})
+    assert _action_took_effect("stop", None, {"status": "docked", "battery": 80})
+    assert _action_took_effect("return_to_base", None, {"status": "returning", "battery": 70})
+    assert _action_took_effect("set_temperature", 26.5, {"on": True, "temperature": 26.5})
+    assert not _action_took_effect("set_temperature", 26.5, {"on": True, "temperature": None})
+    assert _action_took_effect("set_humidity", 70, {"on": True, "humidity": 70})
 
 
 def test_offline_entity_reports_offline(registry):

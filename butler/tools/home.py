@@ -149,6 +149,16 @@ def build_home_tools(registry: DeviceRegistry) -> List[ToolSpec]:
             "verified": True,
         }
 
+    _ACTIONS_BY_TYPE = (
+        "灯：turn_on / turn_off / set_brightness(1-100)；"
+        "风扇：turn_on / turn_off / set_speed(low|medium|high)；"
+        "开关插座：turn_on / turn_off；"
+        "窗帘：open / close / stop / set_position(0-100，100=全开)；"
+        "空调/温控：turn_on / turn_off / set_temperature(按设备单位)；"
+        "加湿/除湿器：turn_on / turn_off / set_humidity(0-100)；"
+        "扫地机器人：start / pause / stop / return_to_base"
+    )
+
     return [
         ToolSpec(
             name="list_devices",
@@ -161,7 +171,7 @@ def build_home_tools(registry: DeviceRegistry) -> List[ToolSpec]:
         ),
         ToolSpec(
             name="get_device_state",
-            description="查询单个设备的当前状态（传感器读数、灯开关/亮度、风扇开关/档位）。",
+            description="查询单个设备的当前状态（传感器读数、灯开关/亮度、风扇档位、窗帘位置、空调温度、加湿器湿度、扫地机器人状态等）。",
             parameters={
                 "type": "object",
                 "properties": {
@@ -190,8 +200,7 @@ def build_home_tools(registry: DeviceRegistry) -> List[ToolSpec]:
         ToolSpec(
             name="control_device",
             description=(
-                "控制灯或风扇。灯支持 turn_on / turn_off / set_brightness(1-100)；"
-                "风扇支持 turn_on / turn_off / set_speed(low|medium|high)。"
+                "控制可控设备。支持的动作：" + _ACTIONS_BY_TYPE + "。"
                 "该操作需要用户确认后才会执行。"
             ),
             parameters={
@@ -200,12 +209,18 @@ def build_home_tools(registry: DeviceRegistry) -> List[ToolSpec]:
                     "device_id": {"type": "string", "description": "设备 ID"},
                     "action": {
                         "type": "string",
-                        "enum": ["turn_on", "turn_off", "set_brightness", "set_speed"],
+                        "enum": [
+                            "turn_on", "turn_off", "set_brightness", "set_speed",
+                            "open", "close", "stop", "set_position",
+                            "set_temperature", "set_humidity",
+                            "start", "pause", "return_to_base",
+                        ],
                     },
                     "value": {
                         "description": (
                             "set_brightness 传 1-100 的整数；set_speed 传 low/medium/high；"
-                            "其他动作不要传本参数"
+                            "set_position 传 0-100 的整数（100=全开）；set_temperature 传数字；"
+                            "set_humidity 传 0-100 的整数；其他动作不要传本参数"
                         )
                     },
                 },
@@ -232,4 +247,32 @@ def _action_took_effect(action: str, value, state: Dict) -> bool:
             return False
     if action == "set_speed":
         return state.get("speed") == value
+    if action == "set_temperature":
+        try:
+            return abs(float(state.get("temperature")) - float(value)) < 0.01
+        except (TypeError, ValueError):
+            return False
+    if action == "set_humidity":
+        try:
+            return int(state.get("humidity")) == int(value)
+        except (TypeError, ValueError):
+            return False
+    if action == "set_position":
+        try:
+            return int(state.get("position")) == int(value)
+        except (TypeError, ValueError):
+            return False
+    if action == "open":
+        # 窗帘是异步的：进行中（opening）也算指令已被接受
+        return state.get("open") is True or state.get("activity") == "opening"
+    if action == "close":
+        return state.get("open") is False or state.get("activity") == "closing"
+    if action == "start":
+        return state.get("status") == "cleaning"
+    if action == "pause":
+        return state.get("status") == "paused"
+    if action == "stop":
+        return state.get("status") in ("idle", "docked")
+    if action == "return_to_base":
+        return state.get("status") in ("returning", "docked")
     return True
