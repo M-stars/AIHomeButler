@@ -185,12 +185,15 @@ def create_app(
     def _device_views() -> List[Dict[str, Any]]:
         views = []
         for device in registry.list():
+            # actions：动态能力清单（阶段 14.5 自动发现推导），应用设备面板按它渲染控件
+            supported = getattr(device, "supported_actions", None)
             item = {
                 "id": device.info.id,
                 "name": device.info.name,
                 "type": device.info.device_type,
                 "area": device.info.area,
                 "available": device.is_available(),
+                "actions": list(supported()) if callable(supported) else [],
                 "state": None,
             }
             try:
@@ -607,6 +610,25 @@ def build_web_app(config) -> FastAPI:
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
+
+    # 设备自动发现周期刷新（阶段 14.5，仅 HA 后端）：新设备自动纳入、消失自动移出，
+    # 变更落审计；HA 不可达时保留现有清单。daemon 线程，进程退出即结束。
+    if (
+        getattr(config, "device_backend", "") == "homeassistant"
+        and getattr(config, "discovery_enabled", True)
+        and getattr(config, "discovery_refresh_seconds", 0) > 0
+    ):
+        from .devices.discovery import DiscoveryRefresher
+        from .devices.homeassistant import get_ha_client
+
+        DiscoveryRefresher(
+            get_ha_client(config),
+            registry,
+            interval_seconds=config.discovery_refresh_seconds,
+            memory_store=memory_store,
+            exclusions_path=config.data_dir / "discovery_exclusions.json",
+        ).start()
+
     confirmer = WebConfirmer()
     voice_stack = build_tts_stack(config)
     speaker_identity = build_speaker_identity(config, voice_stack.client)

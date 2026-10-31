@@ -332,6 +332,7 @@ def test_build_registry_from_config_file(emulator_url, tmp_path, monkeypatch):
         ha_token = "test-token"
         ha_timeout_seconds = 5.0
         ha_devices_file = str(config_file)
+        discovery_enabled = False  # 本用例专测白名单旧路径；自动发现见 test_discovery.py
 
     reg = build_ha_registry(_Cfg())
     assert [d.info.id for d in reg.list()] == ["light.living_room"]
@@ -343,6 +344,7 @@ def test_build_registry_requires_whitelist_file(tmp_path):
         ha_token = "t"
         ha_timeout_seconds = 5.0
         ha_devices_file = str(tmp_path / "missing.json")
+        discovery_enabled = False
 
     with pytest.raises(DeviceOffline.__bases__[0]) as excinfo:  # DeviceError
         build_ha_registry(_Cfg())

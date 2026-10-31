@@ -314,13 +314,18 @@ class MemoryStore:
             self._conn.commit()
             return cursor.rowcount > 0
 
-    def update_rule_state(self, rule_id: int, state: Dict[str, Any], last_fired: bool) -> None:
+    def update_rule_state(self, rule_id: int, state: Dict[str, Any], last_fired: bool,
+                          at: Optional[str] = None) -> None:
+        """last_fired_at 兼作 schedule 规则的"每天至多一次"守卫。
+
+        at 可注入时间戳（RuleEngine 用自己的 now_fn 保持同一时钟源）；缺省真实时钟。
+        """
         with self._lock:
             self._conn.execute(
                 "UPDATE proactive_rules SET state_json = ?, last_fired_at = ? WHERE id = ?",
                 (
                     json.dumps(state, ensure_ascii=False),
-                    _now() if last_fired else None,
+                    (at or _now()) if last_fired else None,
                     int(rule_id),
                 ),
             )
@@ -387,12 +392,16 @@ class MemoryStore:
             self._conn.commit()
             return cursor.rowcount > 0
 
-    def mark_routine_fired(self, routine_id: int, result: str) -> None:
-        """记录执行时间与结果。last_fired_at 同时充当"今天已执行过"的守卫。"""
+    def mark_routine_fired(self, routine_id: int, result: str, at: Optional[str] = None) -> None:
+        """记录执行时间与结果。last_fired_at 同时充当"今天已执行过"的守卫。
+
+        at 可注入时间戳（RoutineRunner 用自己的 now_fn 保持同一时钟源，否则注入
+        假时钟的调用方会因日期错位绕过每日一次守卫）；缺省真实时钟，行为不变。
+        """
         with self._lock:
             self._conn.execute(
                 "UPDATE routines SET last_fired_at = ?, last_result = ? WHERE id = ?",
-                (_now(), str(result)[:500], int(routine_id)),
+                (at or _now(), str(result)[:500], int(routine_id)),
             )
             self._conn.commit()
 

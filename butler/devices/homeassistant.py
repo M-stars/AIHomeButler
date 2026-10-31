@@ -121,12 +121,107 @@ class HassClient:
         return response.json()
 
 
+# ---------------------------------------------------------------- 能力位标志（镜像 HA EntityFeature 常量）
+# 镜像 homeassistant/components/<domain>/const.py，数值多年稳定；只做按位与，
+# HA 新增位对本模块安全无感。新版 HA 的灯亮度能力走 supported_color_modes。
+FAN_SET_SPEED = 1
+COVER_OPEN, COVER_CLOSE, COVER_SET_POSITION, COVER_STOP = 1, 2, 4, 8
+CLIMATE_TARGET_TEMPERATURE, CLIMATE_TARGET_TEMPERATURE_RANGE = 1, 2
+VACUUM_TURN_ON, VACUUM_PAUSE, VACUUM_STOP, VACUUM_RETURN_HOME = 1, 4, 8, 16
+VACUUM_START = 8192
+LIGHT_LEGACY_BRIGHTNESS = 1
+
+
+def _light_supports_brightness(features: Dict[str, Any]) -> bool:
+    modes = features.get("supported_color_modes")
+    if isinstance(modes, list) and modes:
+        return any(mode != "onoff" for mode in modes)
+    if "brightness" in features:
+        return True
+    return bool(int(features.get("supported_features", 0) or 0) & LIGHT_LEGACY_BRIGHTNESS)
+
+
+def supported_actions_for(domain: str, features: Dict[str, Any]) -> Optional[List[str]]:
+    """从 HA 能力快照推导某域实体支持的动作；None 表示推导不出（实体应跳过）。
+
+    discovery 模块用它筛选设备，适配器构造时用它生成 actions——单一事实来源。
+    """
+    try:
+        bits = 0 if isinstance(features.get("supported_features"), bool) else int(
+            features.get("supported_features", 0) or 0
+        )
+    except (TypeError, ValueError):
+        bits = 0
+    if domain == TYPE_LIGHT:
+        actions = ["turn_on", "turn_off"]
+        if _light_supports_brightness(features):
+            actions.append("set_brightness")
+        return actions
+    if domain == TYPE_FAN:
+        actions = ["turn_on", "turn_off"]
+        if "percentage" in features or "percentage_step" in features or (bits & FAN_SET_SPEED):
+            actions.append("set_speed")
+        return actions
+    if domain == TYPE_SWITCH:
+        return ["turn_on", "turn_off"]
+    if domain == TYPE_COVER:
+        # 键存在才走位标志推导（显式 0 = 实体无任何 cover 能力 → None 跳过）；
+        # 键缺失才是旧实体（无位标志时代），按全集
+        if "supported_features" in features:
+            actions = []
+            if bits & COVER_OPEN:
+                actions.append("open")
+            if bits & COVER_CLOSE:
+                actions.append("close")
+            if bits & COVER_STOP:
+                actions.append("stop")
+            if bits & COVER_SET_POSITION:
+                actions.append("set_position")
+            return actions or None
+        return ["open", "close", "stop", "set_position"]
+    if domain == TYPE_CLIMATE:
+        # 双设定点（heat_cool，无单 temperature 属性）无法唯一回读验证，结构性排除
+        if "temperature" not in features and (
+            "target_temp_high" in features or "target_temp_low" in features
+        ):
+            return None
+        actions = ["turn_on", "turn_off"]
+        if "temperature" in features or (bits & CLIMATE_TARGET_TEMPERATURE):
+            actions.append("set_temperature")
+        return actions
+    if domain == TYPE_HUMIDIFIER:
+        actions = ["turn_on", "turn_off"]
+        if "humidity" in features or "min_humidity" in features or "max_humidity" in features:
+            actions.append("set_humidity")
+        return actions
+    if domain == TYPE_VACUUM:
+        actions = []
+        if bits & (VACUUM_START | VACUUM_TURN_ON):
+            actions.append("start")
+        if bits & VACUUM_PAUSE:
+            actions.append("pause")
+        if bits & VACUUM_STOP:
+            actions.append("stop")
+        if bits & VACUUM_RETURN_HOME:
+            actions.append("return_to_base")
+        return actions or None
+    return None
+
+
 class _HaDeviceBase(Device):
     """HA 实体的公共封装：可用性判断 + 状态读取骨架。"""
 
-    def __init__(self, client: HassClient, info: DeviceInfo) -> None:
+    def __init__(self, client: HassClient, info: DeviceInfo,
+                 features: Optional[Dict[str, Any]] = None) -> None:
         super().__init__(info)
         self._client = client
+        # 能力快照（自动发现传入）；None = 白名单旧路径，按类默认动作全集
+        self._features = features
+
+    def _resolved_actions(self, default: List[str]) -> List[str]:
+        if self._features is None:
+            return list(default)
+        return supported_actions_for(self.info.device_type, self._features) or list(default)
 
     def _raw_state(self) -> Dict[str, Any]:
         return self._client.get_state(self.info.id)
@@ -188,12 +283,20 @@ class HaSensor(_HaDeviceBase):
 
 
 class HaLight(_HaDeviceBase, ControllableDevice):
-    """HA 灯实体：开关 + 亮度（HA 0-255 ↔ 本系统 1-100）。"""
+    """HA 灯实体：开关 + 亮度（HA 0-255 ↔ 本系统 1-100）。
 
-    ACTIONS = ["turn_on", "turn_off", "set_brightness"]
+    发现模式按 supported_color_modes 推导：纯开关灯（onoff）不含 set_brightness。
+    """
+
+    DEFAULT_ACTIONS = ["turn_on", "turn_off", "set_brightness"]
+
+    def __init__(self, client: HassClient, info: DeviceInfo,
+                 features: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(client, info, features)
+        self.actions = self._resolved_actions(self.DEFAULT_ACTIONS)
 
     def supported_actions(self) -> List[str]:
-        return list(self.ACTIONS)
+        return list(self.actions)
 
     def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         attributes = raw.get("attributes") or {}
@@ -224,7 +327,7 @@ class HaLight(_HaDeviceBase, ControllableDevice):
             )
         else:
             raise DeviceError(
-                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.actions)}"
             )
         return self.read_state()
 
@@ -244,10 +347,15 @@ class HaLight(_HaDeviceBase, ControllableDevice):
 class HaFan(_HaDeviceBase, ControllableDevice):
     """HA 风扇实体：开关 + 档位（low/medium/high ↔ percentage 33/66/100）。"""
 
-    ACTIONS = ["turn_on", "turn_off", "set_speed"]
+    DEFAULT_ACTIONS = ["turn_on", "turn_off", "set_speed"]
+
+    def __init__(self, client: HassClient, info: DeviceInfo,
+                 features: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(client, info, features)
+        self.actions = self._resolved_actions(self.DEFAULT_ACTIONS)
 
     def supported_actions(self) -> List[str]:
-        return list(self.ACTIONS)
+        return list(self.actions)
 
     def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         attributes = raw.get("attributes") or {}
@@ -277,7 +385,7 @@ class HaFan(_HaDeviceBase, ControllableDevice):
             )
         else:
             raise DeviceError(
-                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.actions)}"
             )
         return self.read_state()
 
@@ -299,10 +407,15 @@ def _percent_to_speed(percentage: int) -> str:
 class HaSwitch(_HaDeviceBase, ControllableDevice):
     """HA 开关/插座实体：纯开/关。"""
 
-    ACTIONS = ["turn_on", "turn_off"]
+    DEFAULT_ACTIONS = ["turn_on", "turn_off"]
+
+    def __init__(self, client: HassClient, info: DeviceInfo,
+                 features: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(client, info, features)
+        self.actions = self._resolved_actions(self.DEFAULT_ACTIONS)
 
     def supported_actions(self) -> List[str]:
-        return list(self.ACTIONS)
+        return list(self.actions)
 
     def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         return {"on": raw.get("state") == "on"}
@@ -314,7 +427,7 @@ class HaSwitch(_HaDeviceBase, ControllableDevice):
             self._client.call_service("switch", "turn_off", self.info.id)
         else:
             raise DeviceError(
-                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.actions)}"
             )
         return self.read_state()
 
@@ -328,9 +441,15 @@ class HaCover(_HaDeviceBase, ControllableDevice):
     """
 
     ACTIONS = ["open", "close", "stop", "set_position"]
+    DEFAULT_ACTIONS = ["open", "close", "stop", "set_position"]
+
+    def __init__(self, client: HassClient, info: DeviceInfo,
+                 features: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(client, info, features)
+        self.actions = self._resolved_actions(self.DEFAULT_ACTIONS)
 
     def supported_actions(self) -> List[str]:
-        return list(self.ACTIONS)
+        return list(self.actions)
 
     def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         attributes = raw.get("attributes") or {}
@@ -359,7 +478,7 @@ class HaCover(_HaDeviceBase, ControllableDevice):
             )
         else:
             raise DeviceError(
-                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.actions)}"
             )
         return self.read_state()
 
@@ -384,9 +503,15 @@ class HaClimate(_HaDeviceBase, ControllableDevice):
     """
 
     ACTIONS = ["turn_on", "turn_off", "set_temperature"]
+    DEFAULT_ACTIONS = ["turn_on", "turn_off", "set_temperature"]
+
+    def __init__(self, client: HassClient, info: DeviceInfo,
+                 features: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(client, info, features)
+        self.actions = self._resolved_actions(self.DEFAULT_ACTIONS)
 
     def supported_actions(self) -> List[str]:
-        return list(self.ACTIONS)
+        return list(self.actions)
 
     def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         attributes = raw.get("attributes") or {}
@@ -409,7 +534,7 @@ class HaClimate(_HaDeviceBase, ControllableDevice):
             )
         else:
             raise DeviceError(
-                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.actions)}"
             )
         return self.read_state()
 
@@ -431,9 +556,15 @@ class HaHumidifier(_HaDeviceBase, ControllableDevice):
     """HA 加湿/除湿器实体：开关 + 目标湿度（0-100）。"""
 
     ACTIONS = ["turn_on", "turn_off", "set_humidity"]
+    DEFAULT_ACTIONS = ["turn_on", "turn_off", "set_humidity"]
+
+    def __init__(self, client: HassClient, info: DeviceInfo,
+                 features: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(client, info, features)
+        self.actions = self._resolved_actions(self.DEFAULT_ACTIONS)
 
     def supported_actions(self) -> List[str]:
-        return list(self.ACTIONS)
+        return list(self.actions)
 
     def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         attributes = raw.get("attributes") or {}
@@ -455,7 +586,7 @@ class HaHumidifier(_HaDeviceBase, ControllableDevice):
             )
         else:
             raise DeviceError(
-                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.actions)}"
             )
         return self.read_state()
 
@@ -476,6 +607,7 @@ class HaVacuum(_HaDeviceBase, ControllableDevice):
     """HA 扫地机器人实体：启动/暂停/停止/回充。"""
 
     ACTIONS = ["start", "pause", "stop", "return_to_base"]
+    DEFAULT_ACTIONS = ["start", "pause", "stop", "return_to_base"]
     _SERVICES = {
         "start": "start",
         "pause": "pause",
@@ -483,8 +615,13 @@ class HaVacuum(_HaDeviceBase, ControllableDevice):
         "return_to_base": "return_to_base",
     }
 
+    def __init__(self, client: HassClient, info: DeviceInfo,
+                 features: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(client, info, features)
+        self.actions = self._resolved_actions(self.DEFAULT_ACTIONS)
+
     def supported_actions(self) -> List[str]:
-        return list(self.ACTIONS)
+        return list(self.actions)
 
     def _map_state(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         attributes = raw.get("attributes") or {}
@@ -499,7 +636,7 @@ class HaVacuum(_HaDeviceBase, ControllableDevice):
         service = self._SERVICES.get(action)
         if service is None:
             raise DeviceError(
-                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.ACTIONS)}"
+                f"{self.info.name} 不支持动作 {action!r}，支持：{', '.join(self.actions)}"
             )
         self._client.call_service("vacuum", service, self.info.id)
         return self.read_state()
@@ -538,21 +675,54 @@ def build_devices_from_spec(client: HassClient, spec: List[Dict[str, Any]]) -> L
     return devices
 
 
-def build_ha_registry(config) -> "DeviceRegistry":
+def get_ha_client(config) -> HassClient:
+    """按配置构造 HA 客户端（webapp/CLI/发现刷新共用同一实例）。"""
+    return HassClient(
+        base_url=config.ha_url,
+        token=config.ha_token,
+        timeout_seconds=config.ha_timeout_seconds,
+    )
+
+
+def build_ha_registry(config, client: Optional[HassClient] = None) -> "DeviceRegistry":
+    """构建 HA 设备注册表。
+
+    默认（DISCOVERY_ENABLED=1，阶段 14.5）：运行时自动发现——枚举 HA 全部实体，
+    按域归类适配器、按能力位标志推导动作；高风险域与车库门结构性排除；
+    用户排除表 data/discovery_exclusions.json 生效。
+    DISCOVERY_ENABLED=0：回退旧白名单文件（config/ha_devices.json），行为不变。
+    """
     from .registry import DeviceRegistry
+
+    client = client or get_ha_client(config)
+    if getattr(config, "discovery_enabled", True):
+        from .discovery import discover_registry, load_exclusions
+
+        exclusions_path = Path(config.data_dir) / "discovery_exclusions.json"
+        registry, specs, skipped = discover_registry(
+            client, load_exclusions(exclusions_path)
+        )
+        if skipped:
+            logging.getLogger("butler.ha").warning(
+                "自动发现跳过 %d 个实体（示例：%s）", len(skipped), skipped[:5]
+            )
+        if not specs:
+            raise DeviceError(
+                "自动发现未找到任何可管控设备：请确认 HA 已有 light/fan/switch/"
+                "cover/climate/humidifier/vacuum/sensor 实体，且 .env 的 HA_URL/"
+                "HA_TOKEN 有效（高风险域 lock/alarm/siren/water_heater 与车库门"
+                "始终被结构性排除）。"
+            )
+        return registry
 
     devices_file = Path(config.ha_devices_file)
     if not devices_file.exists():
         raise DeviceError(
             f"找不到 HA 设备白名单文件：{devices_file}。"
-            "请复制 config/ha_devices.example.json 为 config/ha_devices.json 并按需修改。"
+            "请复制 config/ha_devices.example.json 为 config/ha_devices.json 并按需修改；"
+            "或删除 .env 中的 DISCOVERY_ENABLED=0 恢复自动发现。"
         )
     spec = json.loads(devices_file.read_text(encoding="utf-8")).get("devices", [])
-    client = HassClient(
-        base_url=config.ha_url,
-        token=config.ha_token,
-        timeout_seconds=config.ha_timeout_seconds,
-    )
     registry = DeviceRegistry()
     for device in build_devices_from_spec(client, spec):
         registry.register(device)

@@ -69,6 +69,10 @@ class ButlerConfig:
     ha_token: str
     ha_timeout_seconds: float
     ha_devices_file: Path
+    # 设备自动发现（阶段 14.5）：默认开，运行时枚举 HA 实体并推导能力；
+    # 关闭则回退旧白名单文件 ha_devices.json。刷新间隔 0 = 不做周期刷新。
+    discovery_enabled: bool
+    discovery_refresh_seconds: int
     proactive_check_interval_seconds: float
     data_dir: Path
     log_dir: Path
@@ -216,6 +220,12 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         ha_token=ha_token,
         ha_timeout_seconds=_get_float("HA_TIMEOUT_SECONDS", 10.0),
         ha_devices_file=PROJECT_ROOT / "config" / "ha_devices.json",
+        # 自动发现（仅 homeassistant 后端有意义）：默认开；0 回退白名单文件
+        discovery_enabled=os.environ.get("DISCOVERY_ENABLED", "1").strip().lower()
+        not in ("0", "false", "no", "off"),
+        discovery_refresh_seconds=max(
+            0, _get_int("DISCOVERY_REFRESH_SECONDS", 300, minimum=0)
+        ),
         # 主动服务后台检查间隔（下限 10s：更激进的间隔只会空转，冷却机制才是防轰炸的关键）
         proactive_check_interval_seconds=max(
             10.0, _get_float("PROACTIVE_CHECK_INTERVAL_SECONDS", 60.0)

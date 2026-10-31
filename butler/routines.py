@@ -122,6 +122,9 @@ class RoutineRunner:
     def _execute(self, routine: Dict[str, Any]) -> Dict[str, Any]:
         name = routine["name"]
         actions: List[Dict[str, Any]] = routine.get("actions") or []
+        # 落库时间戳与本运行的时钟源保持一致：守卫按 last_fired_at 日期排重，
+        # 若这里走真实时钟而 now_fn 被注入（测试/模拟），日期错位会绕过每日一次守卫
+        stamp = self._now_fn().astimezone().isoformat(timespec="seconds")
         self._log.info("例行任务 #%s(%s) 开始执行（%d 步）", routine["id"], name, len(actions))
         for index, step in enumerate(actions, start=1):
             try:
@@ -130,7 +133,7 @@ class RoutineRunner:
                 message = (
                     f"例行任务【{name}】在第 {index}/{len(actions)} 步失败，已中止后续步骤：{exc}"
                 )
-                self._store.mark_routine_fired(routine["id"], f"失败于第 {index} 步：{exc}")
+                self._store.mark_routine_fired(routine["id"], f"失败于第 {index} 步：{exc}", at=stamp)
                 self._store.add_notification(
                     rule_id=None, rule_name=f"例行任务·{name}", message=message, level="warning"
                 )
@@ -147,7 +150,7 @@ class RoutineRunner:
                     f"例行任务【{name}】第 {index}/{len(actions)} 步无法确认结果"
                     f"（{exc}），本轮到此为止，明天到点将按计划重新执行"
                 )
-                self._store.mark_routine_fired(routine["id"], f"第 {index} 步结果不明")
+                self._store.mark_routine_fired(routine["id"], f"第 {index} 步结果不明", at=stamp)
                 self._store.add_notification(
                     rule_id=None, rule_name=f"例行任务·{name}", message=message, level="warning"
                 )
@@ -164,7 +167,7 @@ class RoutineRunner:
                 status="ok",
             )
         result = f"完成 {len(actions)} 步"
-        self._store.mark_routine_fired(routine["id"], result)
+        self._store.mark_routine_fired(routine["id"], result, at=stamp)
         self._store.add_audit(
             action="routine_execute", detail=f"#{routine['id']} {name} 全部完成", status="ok"
         )

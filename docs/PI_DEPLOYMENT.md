@@ -64,7 +64,8 @@ scp ha_data.tar.gz pi@aihome-butler.local:~/
 
 `02_ha.sh` 检测到 `~/ha_data.tar.gz` 会自动解压到 `/opt/homeassistant/config` 并沿用原配置
 （`HA_TOKEN` 不变，`.env` 原样可用）。没有该包时脚本走全新安装路线（onboarding 后需
-重新生成 token 填入 .env，白名单 config/ha_devices.json 项目里自带）。
+重新生成 token 填入 .env）。设备无需手动配置：管家自动发现 HA 内全部实体并推导能力
+（高风险设备类型结构性排除；`data/discovery_exclusions.json` 可按实体排除）。
 
 > 迁移完成并验证后，Windows 侧 `docker rm -f homeassistant` 退役（配置包留档即可）。
 

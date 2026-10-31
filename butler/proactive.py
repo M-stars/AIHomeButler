@@ -275,7 +275,12 @@ class RuleEngine:
             rule_id=rule["id"], rule_name=rule["name"], message=message, level=level
         )
         self._last_fire_monotonic[rule["id"]] = self._clock()
-        self._store.update_rule_state(rule["id"], {"streak": self._streaks.get(rule["id"], 0)}, True)
+        # last_fired_at 兼作 schedule 规则的每日守卫：时间戳必须与本引擎的
+        # 时钟源一致，否则注入时钟的调用方（测试/模拟）会因日期错位重复触发
+        stamp = self._now_fn().astimezone().isoformat(timespec="seconds")
+        self._store.update_rule_state(
+            rule["id"], {"streak": self._streaks.get(rule["id"], 0)}, True, at=stamp
+        )
         self._log.info("主动通知 rule=%s(%s) %s", rule["id"], rule["name"], message)
         return {"id": notification_id, "rule_id": rule["id"], "message": message, "level": level}
 
