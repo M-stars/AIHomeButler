@@ -336,7 +336,10 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc))
         schedule: Dict[str, Any] = {"time": body["time"].strip(), "days": days}
         if body.get("catchup_minutes") is not None:
-            schedule["catchup_minutes"] = body["catchup_minutes"]
+            catchup = body["catchup_minutes"]
+            if isinstance(catchup, bool) or not isinstance(catchup, int) or not 0 <= catchup <= 720:
+                raise HTTPException(status_code=400, detail="catchup_minutes 需要是 0-720 的整数")
+            schedule["catchup_minutes"] = catchup
         routine_id = memory_store.add_routine(
             name=name.strip(),
             schedule=schedule,

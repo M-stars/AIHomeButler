@@ -401,3 +401,36 @@ def test_create_schedule_rule_tool(tmp_path):
     )
     assert result.status == "error"
     assert "days" in result.message
+
+
+def test_old_schema_db_migrates_to_support_schedule(tmp_path):
+    """P2 回归：老库（CHECK 不含 schedule）打开时自动重建表，老规则保留且可建 schedule。"""
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE proactive_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('sensor_threshold', 'device_offline')),
+            params_json TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            cooldown_seconds INTEGER NOT NULL DEFAULT 300,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            last_fired_at TEXT
+        );
+        INSERT INTO proactive_rules (name, kind, params_json)
+        VALUES ('老规则', 'device_offline', '{"device_id": "light.x"}');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = MemoryStore(db)
+    rules = store.list_rules()
+    assert len(rules) == 1 and rules[0]["name"] == "老规则"  # 数据无损
+    rule_id = store.add_rule("新定时", "schedule", {"time": "08:00", "days": [0]})
+    kinds = {r["id"]: r["kind"] for r in store.list_rules()}
+    assert kinds[rule_id] == "schedule"  # 新类型可写

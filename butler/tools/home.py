@@ -259,9 +259,13 @@ def _action_took_effect(action: str, value, state: Dict) -> bool:
             return False
     if action == "set_position":
         try:
-            return int(state.get("position")) == int(value)
+            if int(state.get("position")) == int(value):
+                return True
         except (TypeError, ValueError):
-            return False
+            pass
+        # 真实窗帘是异步的：位置仍在向目标移动（opening/closing）也算指令已接受，
+        # 与 open/close 的验证语义一致；终态用 get_device_state 查询
+        return state.get("activity") in ("opening", "closing")
     if action == "open":
         # 窗帘是异步的：进行中（opening）也算指令已被接受
         return state.get("open") is True or state.get("activity") == "opening"

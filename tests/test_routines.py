@@ -6,7 +6,13 @@ from datetime import date, datetime
 import pytest
 
 from butler.confirmation import AutoApproveConfirmer
-from butler.devices.base import ControllableDevice, DeviceError, DeviceInfo, TYPE_LIGHT
+from butler.devices.base import (
+    ControllableDevice,
+    DeviceError,
+    DeviceInfo,
+    StateUnknownError,
+    TYPE_LIGHT,
+)
 from butler.devices.registry import DeviceRegistry
 from butler.memory.store import MemoryStore
 from butler.routines import RoutineRunner, build_routine_tools, validate_step
@@ -215,3 +221,33 @@ def test_scheduler_invokes_extra_tick(tmp_path):
         assert "规则通知" in messages and "例行结果" in messages
     finally:
         scheduler.stop()
+
+
+def test_routine_state_unknown_marks_fired_and_notifies(tmp_path):
+    """P1 回归：HA 传输故障（结果不明）不是 DeviceError 子类，原先会逃逸——
+    任务未标记已执行 → 补跑窗口内每轮重发控制指令且用户无任何通知。"""
+    good = StubLight(device_id="light.a", name="A灯")
+    flaky = StubLight(device_id="light.b", name="B灯")
+
+    def _apply_unknown(action, value=None):
+        flaky.calls.append(action)
+        raise StateUnknownError("控制指令可能已提交到 Home Assistant，但无法确认结果（ConnectTimeout）")
+
+    flaky.apply = _apply_unknown
+    registry, store, runner = _rig(tmp_path, good, flaky)
+    store.add_routine(
+        "传输故障例行", {"time": "07:00", "days": [_TARGET_DAY]},
+        [
+            {"device_id": "light.a", "action": "turn_on"},
+            {"device_id": "light.b", "action": "turn_off"},  # 结果不明
+            {"device_id": "light.a", "action": "turn_off"},  # 不应执行
+        ],
+    )
+    results = runner.run_due()
+    assert len(results) == 1 and results[0]["status"] == "unknown"
+    assert flaky.calls == ["turn_off"] and good.calls == ["turn_on"]  # fail-fast 生效
+    assert any("无法确认结果" in n["message"] and n["level"] == "warning" for n in store.list_notifications())
+    stored = store.list_routines()[0]
+    assert stored["last_fired_at"]  # 已标记 → 今天绝不重试
+    assert runner.run_due() == []
+    assert any(a["status"] == "unknown" for a in store.list_audit())

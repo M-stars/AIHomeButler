@@ -20,7 +20,7 @@ import logging
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from .devices.base import ControllableDevice, DeviceError
+from .devices.base import ControllableDevice, DeviceError, StateUnknownError
 from .devices.registry import DeviceRegistry
 from .memory.store import MemoryStore
 from .proactive import schedule_due
@@ -139,6 +139,25 @@ class RoutineRunner:
                 )
                 self._log.warning("例行任务 %s(%s) 第 %d 步失败：%s", routine["id"], name, index, exc)
                 return {"routine_id": routine["id"], "name": name, "status": "failed", "detail": message}
+            except StateUnknownError as exc:
+                # 传输层故障（如 HA 宕机）：指令可能已提交但结果不明——绝不能重试
+                # （P1 修复：此异常不是 DeviceError 子类，原先会逃逸导致任务未标记
+                # 已执行，在补跑窗口内每轮重发控制指令且用户无感知）
+                message = (
+                    f"例行任务【{name}】第 {index}/{len(actions)} 步无法确认结果"
+                    f"（{exc}），本轮到此为止，明天到点将按计划重新执行"
+                )
+                self._store.mark_routine_fired(routine["id"], f"第 {index} 步结果不明")
+                self._store.add_notification(
+                    rule_id=None, rule_name=f"例行任务·{name}", message=message, level="warning"
+                )
+                self._store.add_audit(
+                    action="routine_execute",
+                    detail=f"#{routine['id']} {name} 第{index}步结果不明",
+                    status="unknown",
+                )
+                self._log.warning("例行任务 %s(%s) 第 %d 步结果不明：%s", routine["id"], name, index, exc)
+                return {"routine_id": routine["id"], "name": name, "status": "unknown", "detail": message}
             self._store.add_audit(
                 action="routine_execute",
                 detail=f"#{routine['id']} {name} 第{index}/{len(actions)}步：{summary}",
