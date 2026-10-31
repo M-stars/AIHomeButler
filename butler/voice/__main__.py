@@ -147,7 +147,7 @@ def main() -> int:
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
-    agent, rule_engine, _executor, _routine_runner = _build_agent(
+    agent, rule_engine, _executor, _routine_runner, _household_checker = _build_agent(
         config, registry, memory_store,
         member_context=identity.context if identity else None,
     )
@@ -277,7 +277,7 @@ def main() -> int:
             print(f"  [工具] {event.tool}: {event.status}")
         print(f"管家: {result.reply}")
         _speak_safely(speaker, result.reply)
-        _deliver_notifications(rule_engine)
+        _deliver_notifications(rule_engine, _household_checker)
 
 
 if __name__ == "__main__":

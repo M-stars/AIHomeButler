@@ -217,4 +217,13 @@ class ToolExecutor:
         if spec.name == "control_device":
             value_part = f"（{args.get('value')}）" if args.get("value") is not None else ""
             return f"控制设备 {args.get('device_id')}：{args.get('action')}{value_part}"
+        # 批量登记类工具（家庭食材/衣物等）：确认界面必须能看到具体清单，
+        # 否则用户对着一个工具名确认就是在盲签
+        items = args.get("items") if isinstance(args, dict) else None
+        if isinstance(items, list) and items:
+            names = [
+                str(i.get("name", "?")) if isinstance(i, dict) else str(i) for i in items
+            ]
+            shown = "、".join(names[:8]) + ("…" if len(names) > 8 else "")
+            return f"调用工具 {spec.name}（共 {len(items)} 项：{shown}）"
         return f"调用工具 {spec.name}"

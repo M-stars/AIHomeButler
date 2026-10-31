@@ -149,6 +149,7 @@ def create_app(
     speaker_identity=None,
     auth_token: Optional[str] = None,
     token_budget=None,
+    household_store=None,
 ) -> FastAPI:
     app = FastAPI(title="AI Home Butler", docs_url=None, redoc_url=None)
     # 访问令牌：未显式传入（或配置为空）时自动生成随机值，启动时打印到控制台
@@ -310,6 +311,50 @@ def create_app(
     @app.get("/api/audit")
     def audit(limit: int = 100):
         return {"audit": memory_store.list_audit(limit=limit)}
+
+    # ---- 家庭生活服务只读视图（阶段 14.7；写入口走对话工具，带确认与审计）----
+
+    @app.get("/api/pantry")
+    def pantry_view():
+        if household_store is None:
+            raise HTTPException(status_code=503, detail="家庭生活服务未装配")
+        from datetime import date
+
+        from .household import days_left
+
+        today = date.today()
+        items = []
+        for item in household_store.list_food(status="in_stock"):
+            left = days_left(item, today)
+            items.append({
+                "id": item["id"], "name": item["name"], "category": item["category"],
+                "quantity": item["quantity"], "added_date": item["added_date"],
+                "expires_in_days": item["expires_in_days"], "days_left": left,
+                "expired": left is not None and left < 0,
+            })
+        items.sort(key=lambda x: (x["days_left"] is None, x["days_left"] or 0))
+        return {"items": items, "count": len(items)}
+
+    @app.get("/api/wardrobe")
+    def wardrobe_view():
+        if household_store is None:
+            raise HTTPException(status_code=503, detail="家庭生活服务未装配")
+        from datetime import date
+
+        from .household import wash_policy
+
+        today = date.today()
+        garments = []
+        for g in household_store.list_garments():
+            policy = wash_policy(g)
+            garments.append({
+                "id": g["id"], "owner": g["owner"], "name": g["name"],
+                "category": g["category"], "warmth": g["warmth"], "status": g["status"],
+                "times_worn_since_wash": g["times_worn_since_wash"],
+                "last_wash_date": g["last_wash_date"],
+                "wash_interval_days": policy["interval"] if policy else None,
+            })
+        return {"garments": garments, "count": len(garments)}
 
     # ---- 例行任务：预授权的定时设备动作（创建即授权，执行留审计）----
 
@@ -604,7 +649,8 @@ def create_app(
 def build_web_app(config) -> FastAPI:
     """运行时装配（CLI 复用同一套组件构造逻辑）。"""
     from .cli import _build_agent, _build_registry
-    from .scheduler import RuleScheduler
+    from .household import HouseholdStore
+    from .scheduler import RuleScheduler, chain_ticks
     from .token_budget import TokenBudget
     from .voice.assembly import build_speaker_identity, build_tts_stack
 
@@ -650,9 +696,12 @@ def build_web_app(config) -> FastAPI:
     confirmer = WebConfirmer()
     voice_stack = build_tts_stack(config)
     speaker_identity = build_speaker_identity(config, voice_stack.client)
-    agent, rule_engine, executor, routine_runner = _build_agent(
+    # 同一 HouseholdStore 实例贯穿工具层与只读端点，避免同库多连接
+    household_store = HouseholdStore(config.data_dir / "household.db")
+    agent, rule_engine, executor, routine_runner, household_checker = _build_agent(
         config, registry, memory_store, confirmer=confirmer,
         member_context=speaker_identity.context,
+        household_store=household_store,
     )
 
     # 规划器与 Web 对话共用同一执行器：确认队列一致，防重放缓存也一致
@@ -660,12 +709,12 @@ def build_web_app(config) -> FastAPI:
     planner = PlanRunner.for_cli(config, registry, memory_store, executor=executor)
 
     # 后台主动检查：不依赖前端轮询，通知落库后由页面定时刷新呈现；
-    # extra_tick 挂例行任务执行器——到点自动执行预授权动作，结果同样落库
+    # extra_tick 链挂例行任务执行器 + 家庭巡检（食材临期/衣物该洗，自保每日一次）
     scheduler = RuleScheduler(
         rule_engine,
         interval_seconds=config.proactive_check_interval_seconds,
         sink=None,
-        extra_tick=routine_runner.run_due,
+        extra_tick=chain_ticks(routine_runner.run_due, household_checker.run_due),
     )
     scheduler.start()
 
@@ -684,6 +733,7 @@ def build_web_app(config) -> FastAPI:
         speaker_identity=speaker_identity,
         auth_token=config.web_token or None,
         token_budget=token_budget,
+        household_store=household_store,
     )
 
 

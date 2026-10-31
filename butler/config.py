@@ -94,6 +94,12 @@ class ButlerConfig:
     wake_word: str
     wake_word_model_dir: Path
     wake_word_threshold: float
+    # 家庭生活服务天气（阶段 14.7）：坐标不配置则穿搭推荐不含天气因素
+    weather_lat: str
+    weather_lon: str
+    weather_city: str
+    weather_timeout_seconds: float
+    weather_cache_seconds: int
 
     def model_profile(self, name: str) -> ModelProfile:
         """读取命名模型档案（.env 中 LLM_<NAME>_BASE_URL/MODEL/API_KEY/
@@ -258,4 +264,10 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         wake_word_threshold=min(
             0.95, max(0.05, _get_float("WAKEWORD_THRESHOLD", 0.25))
         ),
+        # 家庭生活服务天气（阶段 14.7）：Open-Meteo 免密钥；坐标留空=功能关闭
+        weather_lat=os.environ.get("WEATHER_LAT", "").strip(),
+        weather_lon=os.environ.get("WEATHER_LON", "").strip(),
+        weather_city=os.environ.get("WEATHER_CITY", "").strip(),
+        weather_timeout_seconds=_get_float("WEATHER_TIMEOUT_SECONDS", 5.0),
+        weather_cache_seconds=_get_int("WEATHER_CACHE_SECONDS", 1800, minimum=0),
     )

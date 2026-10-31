@@ -21,6 +21,25 @@ _MIN_INTERVAL_SECONDS = 10.0
 _log = logging.getLogger("butler.scheduler")
 
 
+def chain_ticks(*ticks):
+    """把多个每轮任务（如例行任务执行器、家庭巡检）串成一个 extra_tick。
+
+    单个 tick 抛异常只记日志并继续其余 tick——扩展点不能因一个扩展死亡。
+    返回所有 tick 产生的通知列表，统一交给 sink。
+    """
+    def _run_all():
+        fired = []
+        for tick in ticks:
+            if tick is None:
+                continue
+            try:
+                fired.extend(tick())
+            except Exception:
+                _log.exception("调度附加任务（extra_tick）执行失败")
+        return fired
+    return _run_all
+
+
 class RuleScheduler:
     def __init__(
         self,
