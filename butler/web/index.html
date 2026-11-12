@@ -132,6 +132,10 @@
       <h2>任务记录</h2>
       <div id="tasklist" class="small">加载中…</div>
     </div>
+    <div class="card">
+      <h2>审计日志</h2>
+      <div id="auditlist" class="small">加载中…</div>
+    </div>
   </div>
 </div>
 
@@ -139,16 +143,51 @@
 const $ = (id) => document.getElementById(id);
 let busy = false;
 
+// ---- 访问令牌（评审 4.3）：启动 URL 带 ?token= 时自动保存；之后走 localStorage ----
+let TOKEN = localStorage.getItem("butler_token") || "";
+const urlToken = new URLSearchParams(location.search).get("token");
+if (urlToken) {
+  TOKEN = urlToken;
+  localStorage.setItem("butler_token", TOKEN);
+  history.replaceState(null, "", location.pathname); // 从地址栏抹掉令牌
+}
+
+function withAuth(options) {
+  options = options || {};
+  const headers = Object.assign({}, options.headers || {}, { "X-Butler-Token": TOKEN });
+  return Object.assign({}, options, { headers });
+}
+
+let askingToken = false;
+function askToken() {
+  if (askingToken) return; // 多个轮询同时 401 时只弹一次
+  askingToken = true;
+  const t = prompt("请输入访问令牌（启动服务时控制台已打印；也可在 .env 设 WEB_TOKEN 后重启）");
+  if (t && t.trim()) {
+    localStorage.setItem("butler_token", t.trim());
+    location.reload();
+  } else {
+    askingToken = false;
+  }
+}
+
+// 安全的 DOM 构建辅助：所有服务端数据只经 textContent 进页面（评审 4.3 XSS）
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+
 function addMsg(cls, text) {
-  const div = document.createElement("div");
-  div.className = "msg " + cls;
-  div.textContent = text;
+  const div = el("div", "msg " + cls, text);
   $("chatlog").appendChild(div);
   $("chatlog").scrollTop = $("chatlog").scrollHeight;
 }
 
 async function jfetch(url, options) {
-  const resp = await fetch(url, options);
+  const resp = await fetch(url, withAuth(options));
+  if (resp.status === 401) { askToken(); throw new Error("需要访问令牌"); }
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(data.detail || resp.statusText);
   return data;
@@ -224,16 +263,22 @@ async function respond(id, approved) {
 async function refreshDevices() {
   try {
     const data = await jfetch("/api/overview");
-    $("subline").textContent = `模型 ${data.model} ｜ 设备后端 ${data.backend} ｜ 确认模式 ${data.confirmation_mode}`;
+    let sub = `模型 ${data.model} ｜ 设备后端 ${data.backend} ｜ 确认模式 ${data.confirmation_mode}`;
+    if (data.token_budget && data.token_budget.enabled) {
+      sub += ` ｜ 今日 token ${data.token_budget.used_today}/${data.token_budget.limit}`;
+    }
+    $("subline").textContent = sub;
     const tbody = $("devicetable").querySelector("tbody");
-    tbody.innerHTML = "";
+    tbody.textContent = "";
     (data.devices || []).forEach(d => {
       const tr = document.createElement("tr");
+      const nameCell = el("td", "", d.name);
+      nameCell.appendChild(el("div", "small", d.id));
       const stateText = d.available
         ? (d.state ? JSON.stringify(d.state) : "在线")
         : "离线";
-      tr.innerHTML = `<td>${d.name}<div class="small">${d.id}</div></td>
-        <td class="${d.available ? "ok" : "bad"}">${stateText}</td>`;
+      const stateCell = el("td", d.available ? "ok" : "bad", stateText);
+      tr.append(nameCell, stateCell);
       tbody.appendChild(tr);
     });
   } catch (e) { /* 忽略 */ }
@@ -243,20 +288,20 @@ async function refreshMemories() {
   try {
     const data = await jfetch("/api/memories");
     const box = $("memlist");
-    box.innerHTML = "";
+    box.textContent = "";
     (data.memories || []).forEach(m => {
       const row = document.createElement("div");
       row.className = "memitem";
       const label = m.kind === "preference" ? "偏好" : "事实";
       const span = document.createElement("span");
-      span.innerHTML = `<b class="small">[${label}]</b> ${m.content}`;
+      span.append(el("b", "small", `[${label}]`), document.createTextNode(" " + m.content));
       const del = document.createElement("button");
       del.textContent = "删除"; del.className = "danger";
       del.onclick = async () => { await jfetch("/api/memories/" + m.id, {method: "DELETE"}); refreshMemories(); };
       row.append(span, del);
       box.appendChild(row);
     });
-    if (!(data.memories || []).length) box.innerHTML = '<span class="small">暂无记忆</span>';
+    if (!(data.memories || []).length) box.textContent = "暂无记忆";
   } catch (e) { /* 忽略 */ }
 }
 
@@ -264,11 +309,9 @@ async function refreshNotifications() {
   try {
     const data = await jfetch("/api/notifications");
     const box = $("notiflist");
-    box.innerHTML = "";
+    box.textContent = "";
     (data.notifications || []).slice(0, 8).forEach(n => {
-      const div = document.createElement("div");
-      div.className = "notif";
-      div.textContent = `${n.created_at.slice(5, 16)} ${n.message}`;
+      const div = el("div", "notif", `${n.created_at.slice(5, 16)} ${n.message}`);
       box.appendChild(div);
     });
     if (!(data.notifications || []).length) box.textContent = "暂无主动提醒。在对话里说“温度超过30度提醒我”即可创建规则。";
@@ -279,14 +322,35 @@ async function refreshTasks() {
   try {
     const data = await jfetch("/api/tasks");
     const box = $("tasklist");
-    box.innerHTML = "";
+    box.textContent = "";
     (data.tasks || []).slice(0, 6).forEach(t => {
       const div = document.createElement("div");
       div.className = "taskitem";
-      div.innerHTML = `<span>${t.user_text.slice(0, 26)}</span><span class="${t.outcome === "completed" ? "ok" : "warn"}">${t.outcome}</span>`;
+      div.append(
+        el("span", "", String(t.user_text || "").slice(0, 26)),
+        el("span", t.outcome === "completed" ? "ok" : "warn", t.outcome),
+      );
       box.appendChild(div);
     });
     if (!(data.tasks || []).length) box.textContent = "暂无任务记录";
+  } catch (e) { /* 忽略 */ }
+}
+
+async function refreshAudit() {
+  try {
+    const data = await jfetch("/api/audit?limit=30");
+    const box = $("auditlist");
+    box.textContent = "";
+    (data.audit || []).slice(0, 12).forEach(a => {
+      const div = document.createElement("div");
+      div.className = "memitem";
+      div.append(
+        el("span", "", `${a.created_at.slice(5, 16)} [${a.action}] ${a.detail}`.slice(0, 120)),
+        el("span", a.status === "ok" ? "ok" : "warn", a.status || ""),
+      );
+      box.appendChild(div);
+    });
+    if (!(data.audit || []).length) box.textContent = "暂无审计记录（工具调用、记忆修改、确认与音色/声纹变更都会记录在此）";
   } catch (e) { /* 忽略 */ }
 }
 
@@ -299,7 +363,8 @@ function voiceMsg(text, isErr) {
 }
 
 async function jfetchAudio(url, options) {
-  const resp = await fetch(url, options);
+  const resp = await fetch(url, withAuth(options));
+  if (resp.status === 401) { askToken(); throw new Error("需要访问令牌"); }
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}));
     throw new Error(data.detail || resp.statusText);
@@ -315,17 +380,29 @@ function playBlob(blob) {
 }
 
 async function refreshVoiceStatus() {
+  const box = $("voicestatus");
   try {
     const s = await jfetch("/api/voice/status");
-    const parts = [`TTS 后端 <b>${s.backend}</b>`];
-    parts.push(s.backend === "cosyvoice"
-      ? (s.cosyvoice_healthy ? '<span class="ok">CosyVoice 服务在线</span>' : '<span class="bad">CosyVoice 服务离线</span>')
-      : "Windows SAPI 离线合成");
-    if (s.default_voice) parts.push(`默认音色 <b>${s.default_voice.display_name}</b>`);
-    if (s.last_degradation) parts.push(`<span class="warn">⚠ 已降级到 ${s.last_degradation.to}（${s.last_degradation.reason}）</span>`);
-    $("voicestatus").innerHTML = parts.join(" ｜ ") + `<div class="small">${s.ai_disclaimer || ""}</div>`;
+    box.textContent = "";
+    const line = document.createElement("div");
+    line.append(el("b", "", `TTS 后端 ${s.backend}`), document.createTextNode(" ｜ "));
+    if (s.backend === "cosyvoice") {
+      line.append(s.cosyvoice_healthy
+        ? el("span", "ok", "CosyVoice 服务在线")
+        : el("span", "bad", "CosyVoice 服务离线"));
+    } else {
+      line.append(document.createTextNode("Windows SAPI 离线合成"));
+    }
+    if (s.default_voice) {
+      line.append(document.createTextNode(" ｜ 默认音色 "), el("b", "", s.default_voice.display_name));
+    }
+    if (s.last_degradation) {
+      line.append(document.createTextNode(" ｜ "), el("span", "warn", `⚠ 已降级到 ${s.last_degradation.to}（${s.last_degradation.reason}）`));
+    }
+    box.append(line, el("div", "small", s.ai_disclaimer || ""));
   } catch (e) {
-    $("voicestatus").innerHTML = '<span class="bad">语音模块不可用：' + e.message + "</span>";
+    box.textContent = "";
+    box.append(el("span", "bad", "语音模块不可用：" + e.message));
   }
 }
 
@@ -333,17 +410,19 @@ async function refreshVoices() {
   try {
     const data = await jfetch("/api/voices");
     const box = $("voicelist");
-    box.innerHTML = "";
+    box.textContent = "";
     (data.voices || []).forEach(v => {
       const row = document.createElement("div");
       row.className = "memitem";
-      const consentBadge = v.consent_status === "granted"
-        ? '<span class="ok">已授权</span>' : '<span class="warn">未授权</span>';
-      const defaultBadge = v.is_default ? '<span class="ok">[默认]</span>' : "";
       const active = data.active_voice_id === v.voice_id;
       const span = document.createElement("span");
-      span.innerHTML = `<b>${v.display_name}</b> ${defaultBadge} ${consentBadge}
-        <div class="small">${active ? "当前合成使用中 ｜ " : ""}参考文本长度 ${v.reference_text.length} 字</div>`;
+      span.append(el("b", "", v.display_name));
+      if (v.is_default) span.append(el("span", "ok", " [默认]"));
+      span.append(document.createTextNode(" "));
+      span.append(v.consent_status === "granted"
+        ? el("span", "ok", "已授权") : el("span", "warn", "未授权"));
+      span.append(el("div", "small",
+        `${active ? "当前合成使用中 ｜ " : ""}参考文本长度 ${v.reference_text.length} 字`));
       const btns = document.createElement("div");
       btns.style.display = "flex"; btns.style.gap = "6px";
       const mk = (label, cls, fn) => { const b = document.createElement("button"); b.textContent = label; b.className = cls; b.onclick = fn; return b; };
@@ -362,7 +441,7 @@ async function refreshVoices() {
       row.append(span, btns);
       box.appendChild(row);
     });
-    if (!(data.voices || []).length) box.innerHTML = '<span class="small">音色库为空。可添加官方示例音色，或上传参考录音创建个人音色。</span>';
+    if (!(data.voices || []).length) box.textContent = "音色库为空。可添加官方示例音色，或上传参考录音创建个人音色。";
   } catch (e) { /* 状态区已提示 */ }
 }
 
@@ -414,31 +493,49 @@ function speakerMsg(text, isErr) {
 }
 
 async function refreshSpeakers() {
+  const statusBox = $("speakerstatus");
   try {
     const data = await jfetch("/api/speakers");
-    const parts = [];
-    parts.push(data.speaker_recognition
-      ? `<span class="ok">识别已开启</span>（阈值 ${data.threshold.toFixed(2)}，${data.member_count} 位成员）`
-      : '<span class="warn">识别未开启</span>（.env 设 SPEAKER_RECOGNITION=1）');
-    parts.push(data.service_healthy ? '<span class="ok">声纹服务在线</span>' : '<span class="bad">声纹服务离线（需启动 CosyVoice 服务）</span>');
-    $("speakerstatus").innerHTML = parts.join(" ｜ ") + `<div class="small">${data.ai_disclaimer || ""}</div>`;
+    statusBox.textContent = "";
+    const line = document.createElement("div");
+    if (data.speaker_recognition) {
+      line.append(el("span", "ok", "识别已开启"), document.createTextNode(
+        `（阈值 ${data.threshold.toFixed(2)}，${data.member_count} 位成员）`));
+    } else {
+      line.append(el("span", "warn", "识别未开启"), document.createTextNode("（.env 设 SPEAKER_RECOGNITION=1）"));
+    }
+    line.append(document.createTextNode(" ｜ "));
+    line.append(data.service_healthy
+      ? el("span", "ok", "声纹服务在线")
+      : el("span", "bad", "声纹服务离线（需启动 CosyVoice 服务）"));
+    statusBox.append(line, el("div", "small", data.ai_disclaimer || ""));
 
     // 音色下拉框（绑定成员偏好的回答音色）
     const voiceSel = $("spkvoice");
     const voicesData = await jfetch("/api/voices").catch(() => ({voices: []}));
     const current = voiceSel.value;
-    voiceSel.innerHTML = '<option value="">回答音色：默认（可在创建后修改）</option>' +
-      (voicesData.voices || []).map(v => `<option value="${v.voice_id}">${v.display_name}</option>`).join("");
+    voiceSel.textContent = "";
+    const defaultOption = document.createElement("option");
+    defaultOption.value = "";
+    defaultOption.textContent = "回答音色：默认（可在创建后修改）";
+    voiceSel.appendChild(defaultOption);
+    (voicesData.voices || []).forEach(v => {
+      const opt = document.createElement("option");
+      opt.value = v.voice_id;
+      opt.textContent = v.display_name;
+      voiceSel.appendChild(opt);
+    });
     if (current) voiceSel.value = current;
 
     const box = $("speakerlist");
-    box.innerHTML = "";
+    box.textContent = "";
     (data.members || []).forEach(m => {
       const row = document.createElement("div");
       row.className = "memitem";
       const span = document.createElement("span");
-      span.innerHTML = `<b>${m.display_name}</b>
-        <div class="small">识别 ${m.hits.count} 次${m.hits.last_at ? "｜最近 " + m.hits.last_at.slice(5, 16) : ""}｜音色 ${m.voice_id ? "已绑定" : "默认"}</div>`;
+      span.append(el("b", "", m.display_name));
+      span.append(el("div", "small",
+        `识别 ${m.hits.count} 次${m.hits.last_at ? "｜最近 " + m.hits.last_at.slice(5, 16) : ""}｜音色 ${m.voice_id ? "已绑定" : "默认"}`));
       const btns = document.createElement("div");
       btns.style.display = "flex"; btns.style.gap = "6px";
       const mk = (label, cls, fn) => { const b = document.createElement("button"); b.textContent = label; b.className = cls; b.onclick = fn; return b; };
@@ -461,9 +558,10 @@ async function refreshSpeakers() {
       row.append(span, btns);
       box.appendChild(row);
     });
-    if (!(data.members || []).length) box.innerHTML = '<span class="small">尚无成员。注册后，语音模式会自动识别谁在说话并个性化回答。</span>';
+    if (!(data.members || []).length) box.textContent = "尚无成员。注册后，语音模式会自动识别谁在说话并个性化回答。";
   } catch (e) {
-    $("speakerstatus").innerHTML = '<span class="bad">声纹模块不可用：' + e.message + "</span>";
+    statusBox.textContent = "";
+    statusBox.append(el("span", "bad", "声纹模块不可用：" + e.message));
   }
 }
 
@@ -490,7 +588,7 @@ async function createSpeaker() {
 
 $("speakeradd").onclick = createSpeaker;
 
-function refresh() { refreshDevices(); refreshMemories(); refreshNotifications(); refreshTasks(); refreshVoiceStatus(); refreshSpeakers(); }
+function refresh() { refreshDevices(); refreshMemories(); refreshNotifications(); refreshTasks(); refreshAudit(); refreshVoiceStatus(); refreshSpeakers(); }
 
 $("sendbtn").onclick = send;
 $("chatinput").addEventListener("keydown", e => { if (e.key === "Enter") send(); });

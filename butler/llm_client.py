@@ -69,6 +69,7 @@ class OpenAICompatClient:
         model: str,
         timeout_seconds: float = 60.0,
         max_retries: int = 3,
+        token_budget=None,
     ) -> None:
         if not api_key:
             raise LLMError("API Key 为空，请检查 .env 中的 LLM_API_KEY")
@@ -78,8 +79,12 @@ class OpenAICompatClient:
         )
         self._model = model
         self._max_retries = max(1, int(max_retries))
+        # 每日 token 预算（可选）：调用前检查、调用后入账
+        self._budget = token_budget
 
     def chat(self, messages: List[dict], tools: Optional[List[dict]] = None) -> LLMResponse:
+        if self._budget is not None:
+            self._budget.raise_if_exhausted()
         kwargs: Dict = {"model": self._model, "messages": messages}
         if tools:
             kwargs["tools"] = tools
@@ -88,7 +93,10 @@ class OpenAICompatClient:
         for attempt in range(1, self._max_retries + 1):
             try:
                 response = self._client.chat.completions.create(**kwargs)
-                return self._parse(response)
+                parsed = self._parse(response)
+                if self._budget is not None:
+                    self._budget.add(parsed.usage.get("total_tokens", 0))
+                return parsed
             except _RETRYABLE_ERRORS as exc:  # 网络/超时/限流/5xx：退避后重试
                 last_error = exc
                 wait_seconds = 2 ** (attempt - 1)
@@ -134,12 +142,16 @@ class OpenAICompatClient:
         return LLMResponse(content=content, tool_calls=tool_calls, usage=usage)
 
 
-def build_llm(config: ButlerConfig, profile_name: str = "main") -> OpenAICompatClient:
+def build_llm(
+    config: ButlerConfig, profile_name: str = "main", token_budget=None
+) -> OpenAICompatClient:
     """按命名模型档案构造客户端——装配层唯一的建模型入口。
 
     角色约定：main=对话主模型（Agent），planner=多步任务规划（PlanRunner）；
     档案未配置的变量自动回退全局 LLM_*，因此不写任何 LLM_<NAME>_* 时
     所有角色都用同一个模型（与单模型时代行为一致）。
+    token_budget 传入共享的 TokenBudget 时，该客户端的每次调用都会
+    检查并累计每日用量（超限拒绝调用）。
     """
     profile = config.model_profile(profile_name)
     return OpenAICompatClient(
@@ -148,4 +160,5 @@ def build_llm(config: ButlerConfig, profile_name: str = "main") -> OpenAICompatC
         model=profile.model,
         timeout_seconds=profile.timeout_seconds,
         max_retries=profile.max_retries,
+        token_budget=token_budget,
     )

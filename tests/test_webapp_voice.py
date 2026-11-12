@@ -77,6 +77,7 @@ def app_client(tmp_path, monkeypatch):
             delete=lambda mid: True,
             list_notifications=lambda: [],
             list_task_logs=lambda: [],
+            add_audit=lambda *a, **k: 1,
         ),
         agent=SimpleNamespace(process=lambda text: SimpleNamespace(
             reply="好的", tool_events=[], stopped_by_limit=False)),
@@ -84,8 +85,9 @@ def app_client(tmp_path, monkeypatch):
         confirmer=SimpleNamespace(pending=lambda: [], respond=lambda cid, ok: True),
         planner=None,
         voice_stack=stack,
+        auth_token="test-token",
     )
-    return TestClient(app), stack
+    return TestClient(app, headers={"X-Butler-Token": "test-token"}), stack
 
 
 def test_voice_status_endpoint(app_client):
@@ -200,8 +202,9 @@ def test_tts_endpoint_sapi_backend(tmp_path, monkeypatch):
         confirmer=SimpleNamespace(pending=lambda: [], respond=lambda cid, ok: True),
         planner=None,
         voice_stack=stack,
+        auth_token="test-token",
     )
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-Butler-Token": "test-token"})
     # SAPI 不可用的环境下 speaker 是 SilentSpeaker → speak_to_file 抛 VoiceError → 503
     resp = client.post("/api/tts", json={"text": "朗读"})
     if isinstance(stack.speaker, SilentSpeaker):
@@ -230,8 +233,9 @@ def test_voice_endpoints_503_without_stack(tmp_path, monkeypatch):
         confirmer=SimpleNamespace(pending=lambda: [], respond=lambda cid, ok: True),
         planner=None,
         voice_stack=None,
+        auth_token="test-token",
     )
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-Butler-Token": "test-token"})
     assert client.get("/api/voice/status").status_code == 503
     assert client.get("/api/voices").status_code == 503
     assert client.post("/api/tts", json={"text": "x"}).status_code == 503

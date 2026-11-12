@@ -58,6 +58,10 @@ class ButlerConfig:
     llm_timeout_seconds: float
     llm_max_retries: int
     max_tool_calls_per_turn: int
+    # 单次模型响应携带的 tool_calls 上限：超出部分不执行并回填错误结果（评审 4.2）
+    max_tool_calls_per_response: int
+    # 每日 token 预算：0=不限；超限后拒绝新的模型调用（评审 4.5）
+    daily_token_budget: int
     max_history_messages: int
     confirmation_mode: str
     device_backend: str
@@ -65,10 +69,16 @@ class ButlerConfig:
     ha_token: str
     ha_timeout_seconds: float
     ha_devices_file: Path
+    # 设备自动发现（阶段 14.5）：默认开，运行时枚举 HA 实体并推导能力；
+    # 关闭则回退旧白名单文件 ha_devices.json。刷新间隔 0 = 不做周期刷新。
+    discovery_enabled: bool
+    discovery_refresh_seconds: int
     proactive_check_interval_seconds: float
     data_dir: Path
     log_dir: Path
     log_level: str
+    # Web 鉴权（评审 4.3）：留空则每次启动自动生成随机令牌并打印到控制台
+    web_token: str
     # 语音合成（阶段 12）：默认 sapi 保持历史行为不变
     tts_backend: str
     cosyvoice_url: str
@@ -79,6 +89,17 @@ class ButlerConfig:
     # 家庭成员声纹识别（阶段 13）：默认关闭，行为不变
     speaker_recognition: bool
     speaker_threshold: float
+    # 唤醒词（阶段 14）：默认关闭，--mic 行为不变
+    wakeword_enabled: bool
+    wake_word: str
+    wake_word_model_dir: Path
+    wake_word_threshold: float
+    # 家庭生活服务天气（阶段 14.7）：坐标不配置则穿搭推荐不含天气因素
+    weather_lat: str
+    weather_lon: str
+    weather_city: str
+    weather_timeout_seconds: float
+    weather_cache_seconds: int
 
     def model_profile(self, name: str) -> ModelProfile:
         """读取命名模型档案（.env 中 LLM_<NAME>_BASE_URL/MODEL/API_KEY/
@@ -174,6 +195,11 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
             raise ConfigError(f"配置 HA_URL 必须以 http(s):// 开头，当前值：{ha_url!r}")
 
     data_dir = PROJECT_ROOT / os.environ.get("DATA_DIR", "data").strip()
+    wake_model_dir_env = os.environ.get("WAKEWORD_MODEL_DIR", "").strip()
+    wake_word_model_dir = (
+        PROJECT_ROOT / wake_model_dir_env if wake_model_dir_env
+        else data_dir / "models" / "sherpa-kws"
+    )
 
     tts_backend = os.environ.get("TTS_BACKEND", TTS_BACKEND_SAPI).strip().lower()
     if tts_backend not in _VALID_TTS_BACKENDS:
@@ -191,6 +217,8 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         llm_timeout_seconds=_get_float("LLM_TIMEOUT_SECONDS", 60.0),
         llm_max_retries=_get_int("LLM_MAX_RETRIES", 3),
         max_tool_calls_per_turn=_get_int("MAX_TOOL_CALLS_PER_TURN", 8),
+        max_tool_calls_per_response=_get_int("MAX_TOOL_CALLS_PER_RESPONSE", 4),
+        daily_token_budget=_get_int("TOKEN_BUDGET_PER_DAY", 500_000, minimum=0),
         max_history_messages=_get_int("MAX_HISTORY_MESSAGES", 60, minimum=10),
         confirmation_mode=confirmation_mode,
         device_backend=device_backend,
@@ -198,6 +226,12 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         ha_token=ha_token,
         ha_timeout_seconds=_get_float("HA_TIMEOUT_SECONDS", 10.0),
         ha_devices_file=PROJECT_ROOT / "config" / "ha_devices.json",
+        # 自动发现（仅 homeassistant 后端有意义）：默认开；0 回退白名单文件
+        discovery_enabled=os.environ.get("DISCOVERY_ENABLED", "1").strip().lower()
+        not in ("0", "false", "no", "off"),
+        discovery_refresh_seconds=max(
+            0, _get_int("DISCOVERY_REFRESH_SECONDS", 300, minimum=0)
+        ),
         # 主动服务后台检查间隔（下限 10s：更激进的间隔只会空转，冷却机制才是防轰炸的关键）
         proactive_check_interval_seconds=max(
             10.0, _get_float("PROACTIVE_CHECK_INTERVAL_SECONDS", 60.0)
@@ -205,6 +239,7 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         data_dir=data_dir,
         log_dir=PROJECT_ROOT / "logs",
         log_level=log_level,
+        web_token=os.environ.get("WEB_TOKEN", "").strip(),
         # 语音合成：CosyVoice 为可选后端，默认 sapi 保证原有行为不变
         tts_backend=tts_backend,
         cosyvoice_url=cosyvoice_url,
@@ -221,4 +256,18 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         speaker_threshold=min(
             0.95, max(0.05, _get_float("SPEAKER_THRESHOLD", 0.30))
         ),
+        # 唤醒词：默认关闭；开启后 --mic 模式待机监听（依赖 sherpa-onnx 与本地模型）
+        wakeword_enabled=os.environ.get("WAKEWORD_ENABLED", "0").strip().lower()
+        in ("1", "true", "yes", "on"),
+        wake_word=os.environ.get("WAKE_WORD", "小管家").strip() or "小管家",
+        wake_word_model_dir=wake_word_model_dir,
+        wake_word_threshold=min(
+            0.95, max(0.05, _get_float("WAKEWORD_THRESHOLD", 0.25))
+        ),
+        # 家庭生活服务天气（阶段 14.7）：Open-Meteo 免密钥；坐标留空=功能关闭
+        weather_lat=os.environ.get("WEATHER_LAT", "").strip(),
+        weather_lon=os.environ.get("WEATHER_LON", "").strip(),
+        weather_city=os.environ.get("WEATHER_CITY", "").strip(),
+        weather_timeout_seconds=_get_float("WEATHER_TIMEOUT_SECONDS", 5.0),
+        weather_cache_seconds=_get_int("WEATHER_CACHE_SECONDS", 1800, minimum=0),
     )

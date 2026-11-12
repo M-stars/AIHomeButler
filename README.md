@@ -3,9 +3,11 @@
 在成熟开源智能家居基础设施之上构建的 AI 家庭管家：具备环境理解、记忆、任务规划、
 安全执行与主动服务能力。**不重复造 Home Assistant，不重写语音引擎。**
 
-许可证：[MIT](LICENSE) ｜ 当前状态：**阶段 0-11 首轮全部完成** —— 文本/网页/语音三种交互，
-模拟与 Home Assistant 双设备后端，长期记忆，多步骤任务规划，主动提醒，语音播报；
-真实 HA 容器与 ESP32 烧录各差一步用户操作（见 docs/ROADMAP.md「近期待办」）。
+许可证：[MIT](LICENSE) ｜ 当前状态：**阶段 0-14 首轮全部完成** —— 文本/网页/语音三种交互，
+模拟与 Home Assistant 双设备后端（真实 HA 容器已部署运行），长期记忆，多步骤任务规划，
+定时提醒，预授权例行任务，主动提醒，语音播报，成员声纹识别，唤醒词待机，
+食材管家与衣柜管家（阶段 14.7）；
+ESP32 烧录差一步用户操作（见 docs/ROADMAP.md「近期待办」）。
 
 - 需求与验收：[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)
 - 架构设计：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
@@ -13,6 +15,7 @@
 - 开源复用记录：[docs/OPEN_SOURCE_REUSE.md](docs/OPEN_SOURCE_REUSE.md)
 - 运行维护手册：[docs/RUNBOOK.md](docs/RUNBOOK.md)
 - 硬件接入：[docs/HARDWARE.md](docs/HARDWARE.md) ｜ 语音：[docs/VOICE.md](docs/VOICE.md)
+- 树莓派部署：[docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md)（选型/烧录/一键脚本/迁移/验证）
 - 路线图：[docs/ROADMAP.md](docs/ROADMAP.md)
 
 ## 能做什么
@@ -25,15 +28,31 @@
   逐步可追踪，出错即中止。
 - **主动提醒**：对话里说「温度超过 30 度提醒我」即可创建规则（后台每 60 秒自动检查，
   连续命中+冷却防霸屏，纯通知，绝不自动控制设备）。
+- **定时提醒**（档 1）：「每天 08:00 提醒爷爷量血压」「工作日 07:20 提醒小星出门上学」
+  ——到点自动通知，可指定家庭成员，错过时刻 30 分钟内补跑，每天至多提醒一次。
+- **例行任务**（档 2）：「工作日 07:00 自动开客厅窗帘」——创建时确认完整动作清单
+  即完成预授权，到点自动执行（无需再次确认）；逐动作预检、执行留审计、失败立即
+  通知并中止后续步骤；门锁/热水器等高风险设备类型结构上无法进入例行任务。
 - **双设备后端**：`DEVICE_BACKEND=simulated`（默认，安全）或 `homeassistant`（真实设备，
-  白名单管控），Agent 层零改动切换。
+  自动发现+动态能力——运行时枚举 HA 实体、按能力位标志推导每台设备可做的动作，
+  高风险设备类型结构性排除，`DISCOVERY_ENABLED=0` 可回退手动白名单），Agent 层零改动切换。
 - **家庭成员声纹**（阶段 13）：注册家人声纹后，语音模式自动识别谁在说话——
   称呼个性化、记忆按人隔离（陌生人只看共享记忆）、按成员切换回答音色；
   声纹仅用于个性化，不作为身份验证，确认流程不放松。
+- **唤醒词待机**（阶段 14）：`--mic --wake` 说「小管家」唤醒——sherpa-onnx 离线
+  关键词检测（3.3M 模型约 33 MB，CPU 约 50 倍实时，树莓派可跑），换唤醒词改
+  keywords.txt 即可无需训练；依赖未装自动退回免唤醒模式。见 docs/VOICE.md §6。
 - **可选 CosyVoice 中文合成 + 音色库**（阶段 12）：`TTS_BACKEND=cosyvoice` 切换到
   官方开源 CosyVoice（独立环境运行，主项目零新增依赖）；上传参考录音（需说话人
   授权）即可克隆音色，管家用你的声音播报回复；服务故障按配置降级回 SAPI。
   部署见 [docs/COSYVOICE_SETUP.md](docs/COSYVOICE_SETUP.md)。
+- **食材管家**（阶段 14.7）：对话里说「今天买了西红柿、鸡蛋和排骨」批量入库，
+  「西红柿用完了」登记消耗；台账按入库日期+保质期倒计时，临期/过期由后台巡检
+  每天至多提醒一次；「家里能做什么菜」基于真实库存推荐，不编造。
+- **衣柜管家**（阶段 14.7）：按成员登记衣物，「今天穿的什么」一句话记账（同日
+  重复自动幂等），穿着次数+距上次洗涤天数触发「该洗了」提醒，洗好报一下即重置；
+  「今天穿什么」结合 Open-Meteo 天气（`.env` 配坐标即可，免费免密钥）与你的历史
+  反馈（"这条裤子显胖"会被记住）给出建议；未配天气时照常推荐并如实说明。
 
 ## 快速开始
 
@@ -106,11 +125,12 @@ butler/
 ├── memory/           # SQLite 长期记忆、任务日志、规则与通知
 ├── devices/          # 设备抽象 + 模拟设备 + Home Assistant 适配器 + 注册表
 ├── emulator/         # HA REST API 本地模拟器（无 HA 也能联调适配器）
-├── voice/            # 语音桥接：SAPI TTS + faster-whisper ASR + 麦克风
+├── voice/            # 语音桥接：SAPI TTS + faster-whisper ASR + 麦克风 + 唤醒词
+├── household/        # 家庭生活服务：食材管家 + 衣柜管家（台账/巡检/天气穿搭）
 └── tools/            # 工具注册表、参数校验、安全执行器、家庭/记忆/规则工具集
 firmware/esphome/     # ESP32 固件配置（ESPHome 2026.10.1 与 2025.5.2 双版本校验通过）
 scripts/              # HA 一键部署、备份脚本
-tests/                # 92 项测试：离线回归 + 真实 API 集成（默认跳过）
+tests/                # 327 项测试：离线回归 + 真实 API 集成（默认跳过）
 docs/                 # 需求/架构/选型/复用/路线图/RUNBOOK/硬件/语音
 ```
 
@@ -119,14 +139,16 @@ docs/                 # 需求/架构/选型/复用/路线图/RUNBOOK/硬件/语
 
 ## 已知限制
 
-- 真实 Home Assistant 容器待部署：Docker Desktop 已装好，**需重启一次电脑完成 WSL2**，
-  然后管理员运行 `scripts\setup_homeassistant.ps1`（详见 docs/RUNBOOK.md 第 3 节）。
+- 设备控制支持 8 类：sensor / light / fan / switch / cover（窗帘）/ climate（空调温控）/
+  humidifier / vacuum；HA 白名单外的实体不暴露，lock / water_heater / alarm 等高风险
+  域不实现（安全设计）。
 - ESP32 待烧录：固件已通过 ESPHome 2026.10.1 校验；此前编译产物（2025.5.2）基于旧实体名，
   插线后 `esphome run firmware/esphome/esp32-butler.yaml` 会自动重新编译并烧录。
 - 语音输入的噪声环境表现未做真实调试；无唤醒词（演进方向 HA Voice，见 docs/VOICE.md）。
 - `CONFIRMATION_MODE=never` 仅供调试，会跳过所有确认并输出警告日志。
-- Web 界面无登录鉴权，默认仅绑定 127.0.0.1，勿暴露公网。
-- 主动服务为纯通知级：设备自动化交给 HA 内置自动化承担（安全设计）。
+- Web 界面要求访问令牌（.env 设 WEB_TOKEN，留空则每次启动自动生成并打印），
+  默认仅绑定 127.0.0.1，勿暴露公网。
+- 例行任务的 Web 管理面板待建（API `/api/routines` 与对话工具已可用）。
 
 ## 安全提示
 

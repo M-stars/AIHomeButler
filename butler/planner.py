@@ -24,6 +24,7 @@ from .devices.registry import DeviceRegistry
 from .llm_client import LLMClient, LLMError, build_llm
 from .memory.store import MemoryStore
 from .proactive import build_proactive_tools
+from .token_budget import TokenBudget
 from .tools.executor import ToolExecutor
 from .tools.home import build_home_tools
 from .tools.memory_tools import build_memory_tools
@@ -97,7 +98,8 @@ class PlanRunner:
             tool_registry.register(spec)
         if executor is None:
             executor = ToolExecutor(tool_registry, ConsoleConfirmer())
-        llm = build_llm(config, "planner")
+        budget = TokenBudget(memory_store, config.daily_token_budget)
+        llm = build_llm(config, "planner", token_budget=budget)
         return cls(llm, tool_registry, executor, registry, memory_store)
 
     # ------------------------------------------------------------------ 主流程

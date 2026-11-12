@@ -72,6 +72,29 @@ class MemoryStore:
                     message TEXT NOT NULL,
                     read INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    actor TEXT NOT NULL DEFAULT 'system',
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS token_usage (
+                    day TEXT PRIMARY KEY,
+                    used_tokens INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS routines (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    schedule_json TEXT NOT NULL,
+                    actions_json TEXT NOT NULL,
+                    notify_on_success INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_fired_at TEXT,
+                    last_result TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             self._conn.commit()
@@ -82,6 +105,36 @@ class MemoryStore:
                     self._conn.commit()
             except sqlite3.OperationalError:
                 pass
+            # 例行任务迁移：老库的 proactive_rules 用 CHECK 约束锁死了 kind，
+            # 无法存 schedule 类型；SQLite 不能改 CHECK，检测到旧约束时重建表
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='proactive_rules'"
+                ).fetchone()
+            if row and "schedule" not in (row["sql"] or ""):
+                with self._lock:
+                    self._conn.executescript(
+                        """
+                        BEGIN;
+                        CREATE TABLE proactive_rules_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            name TEXT NOT NULL,
+                            kind TEXT NOT NULL CHECK (kind IN ('sensor_threshold', 'device_offline', 'schedule')),
+                            params_json TEXT NOT NULL,
+                            enabled INTEGER NOT NULL DEFAULT 1,
+                            cooldown_seconds INTEGER NOT NULL DEFAULT 300,
+                            state_json TEXT NOT NULL DEFAULT '{}',
+                            last_fired_at TEXT
+                        );
+                        INSERT INTO proactive_rules_new
+                            SELECT id, name, kind, params_json, enabled, cooldown_seconds, state_json, last_fired_at
+                            FROM proactive_rules;
+                        DROP TABLE proactive_rules;
+                        ALTER TABLE proactive_rules_new RENAME TO proactive_rules;
+                        COMMIT;
+                        """
+                    )
+                    self._conn.commit()
 
     # ------------------------------------------------------------- 记忆 CRUD
 
@@ -100,7 +153,9 @@ class MemoryStore:
                 (kind, content, source, member_id, _now(), _now()),
             )
             self._conn.commit()
-            return int(cursor.lastrowid)
+            memory_id = int(cursor.lastrowid)
+        self.add_audit("memory.add", f"#{memory_id} [{kind}] {content[:200]}", "ok")
+        return memory_id
 
     def list(self, kind: Optional[str] = None,
              for_member_id: Optional[str] = None,
@@ -141,7 +196,10 @@ class MemoryStore:
                 (content, _now(), int(memory_id)),
             )
             self._conn.commit()
-            return cursor.rowcount > 0
+            changed = cursor.rowcount > 0
+        if changed:
+            self.add_audit("memory.update", f"#{int(memory_id)} → {content[:200]}", "ok")
+        return changed
 
     def delete(self, memory_id: int) -> bool:
         with self._lock:
@@ -149,7 +207,10 @@ class MemoryStore:
                 "DELETE FROM memories WHERE id = ?", (int(memory_id),)
             )
             self._conn.commit()
-            return cursor.rowcount > 0
+            deleted = cursor.rowcount > 0
+        if deleted:
+            self.add_audit("memory.delete", f"#{int(memory_id)}（物理删除，不再参与决策）", "ok")
+        return deleted
 
     def export(self) -> Dict[str, Any]:
         return {
@@ -216,8 +277,8 @@ class MemoryStore:
     # ---------------------------------------------------------- 主动服务规则
 
     def add_rule(self, name: str, kind: str, params: Dict[str, Any], cooldown_seconds: int = 300) -> int:
-        if kind not in ("sensor_threshold", "device_offline"):
-            raise ValueError("规则类型只能是 sensor_threshold / device_offline")
+        if kind not in ("sensor_threshold", "device_offline", "schedule"):
+            raise ValueError("规则类型只能是 sensor_threshold / device_offline / schedule")
         with self._lock:
             cursor = self._conn.execute(
                 "INSERT INTO proactive_rules (name, kind, params_json, enabled, cooldown_seconds)"
@@ -253,15 +314,94 @@ class MemoryStore:
             self._conn.commit()
             return cursor.rowcount > 0
 
-    def update_rule_state(self, rule_id: int, state: Dict[str, Any], last_fired: bool) -> None:
+    def update_rule_state(self, rule_id: int, state: Dict[str, Any], last_fired: bool,
+                          at: Optional[str] = None) -> None:
+        """last_fired_at 兼作 schedule 规则的"每天至多一次"守卫。
+
+        at 可注入时间戳（RuleEngine 用自己的 now_fn 保持同一时钟源）；缺省真实时钟。
+        """
         with self._lock:
             self._conn.execute(
                 "UPDATE proactive_rules SET state_json = ?, last_fired_at = ? WHERE id = ?",
                 (
                     json.dumps(state, ensure_ascii=False),
-                    _now() if last_fired else None,
+                    (at or _now()) if last_fired else None,
                     int(rule_id),
                 ),
+            )
+            self._conn.commit()
+
+    # ------------------------------------------------------------------ 例行任务
+
+    def add_routine(
+        self,
+        name: str,
+        schedule: Dict[str, Any],
+        actions: List[Dict[str, Any]],
+        notify_on_success: bool = False,
+    ) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO routines (name, schedule_json, actions_json, notify_on_success, enabled, last_result, created_at)"
+                " VALUES (?, ?, ?, ?, 1, '', ?)",
+                (
+                    name,
+                    json.dumps(schedule, ensure_ascii=False),
+                    json.dumps(actions, ensure_ascii=False),
+                    1 if notify_on_success else 0,
+                    _now(),
+                ),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
+    def list_routines(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, name, schedule_json, actions_json, notify_on_success, enabled,"
+                " last_fired_at, last_result, created_at"
+                " FROM routines ORDER BY id"
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            for json_col, target in (("schedule_json", "schedule"), ("actions_json", "actions")):
+                try:
+                    item[target] = json.loads(item.pop(json_col))
+                except ValueError:
+                    item[target] = {} if target == "schedule" else []
+            item["notify_on_success"] = bool(item["notify_on_success"])
+            item["enabled"] = bool(item["enabled"])
+            result.append(item)
+        return result
+
+    def delete_routine(self, routine_id: int) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM routines WHERE id = ?", (int(routine_id),)
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def set_routine_enabled(self, routine_id: int, enabled: bool) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE routines SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, int(routine_id)),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_routine_fired(self, routine_id: int, result: str, at: Optional[str] = None) -> None:
+        """记录执行时间与结果。last_fired_at 同时充当"今天已执行过"的守卫。
+
+        at 可注入时间戳（RoutineRunner 用自己的 now_fn 保持同一时钟源，否则注入
+        假时钟的调用方会因日期错位绕过每日一次守卫）；缺省真实时钟，行为不变。
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE routines SET last_fired_at = ?, last_result = ? WHERE id = ?",
+                (at or _now(), str(result)[:500], int(routine_id)),
             )
             self._conn.commit()
 
@@ -299,6 +439,67 @@ class MemoryStore:
             cursor = self._conn.execute("UPDATE notifications SET read = 1 WHERE read = 0")
             self._conn.commit()
             return cursor.rowcount
+
+    # ------------------------------------------------------------------ 审计日志
+
+    _AUDIT_RETENTION = 2000
+
+    def add_audit(self, action: str, detail: str = "", status: str = "",
+                  actor: str = "system") -> int:
+        """追加一条审计记录。actor: system=存储层自动记录 / agent=模型工具调用 /
+        user=Web 界面操作。超量历史在写入时按保留上限裁剪。"""
+        action = (action or "").strip()
+        if not action:
+            raise ValueError("审计 action 不能为空")
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO audit_log (created_at, actor, action, detail, status)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (_now(), actor, action, (detail or "")[:500], (status or "")[:50]),
+            )
+            self._conn.execute(
+                "DELETE FROM audit_log WHERE id <= ("
+                " SELECT id FROM audit_log ORDER BY id DESC LIMIT 1 OFFSET ?)",
+                (self._AUDIT_RETENTION,),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
+    def list_audit(self, limit: int = 100) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, created_at, actor, action, detail, status FROM audit_log"
+                " ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------- token 用量
+
+    def add_tokens_used(self, total_tokens: int) -> int:
+        """累计当日 token 用量（按本地日期分桶），返回累计后的当日总量。"""
+        total_tokens = max(0, int(total_tokens))
+        day = _now()[:10]
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO token_usage (day, used_tokens) VALUES (?, ?)"
+                " ON CONFLICT(day) DO UPDATE SET used_tokens = used_tokens + ?",
+                (day, total_tokens, total_tokens),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT used_tokens FROM token_usage WHERE day = ?", (day,)
+            ).fetchone()
+        return int(row["used_tokens"]) if row else 0
+
+    def tokens_used_today(self) -> int:
+        day = _now()[:10]
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT used_tokens FROM token_usage WHERE day = ?", (day,)
+            ).fetchone()
+        return int(row["used_tokens"]) if row else 0
 
     def close(self) -> None:
         with self._lock:

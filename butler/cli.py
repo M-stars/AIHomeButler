@@ -24,6 +24,7 @@ from .logging_setup import setup_logging
 from .memory.store import MemoryStore
 from .proactive import RuleEngine, build_proactive_tools
 from .scheduler import RuleScheduler
+from .token_budget import TokenBudget
 from .tools.executor import ToolExecutor
 from .tools.home import build_default_devices, build_home_tools
 from .tools.memory_tools import build_memory_tools
@@ -81,13 +82,18 @@ def _print_step(step: dict) -> None:
     print(f"  [{mark} 步骤] {step.get('tool')} → {status}：{step.get('message', '')}")
 
 
-def _deliver_notifications(rule_engine: RuleEngine) -> None:
+def _deliver_notifications(rule_engine: RuleEngine, household_checker=None) -> None:
     """对话轮次结束后的即时检查（与后台调度器互补，冷却机制防重复）。"""
     try:
         fired = rule_engine.run_checks()
     except Exception:
         logging.getLogger("butler.cli").exception("主动规则检查失败")
-        return
+        fired = []
+    if household_checker is not None:
+        try:
+            fired = fired + household_checker.run_due()
+        except Exception:
+            logging.getLogger("butler.cli").exception("家庭巡检（食材/衣柜）失败")
     for notification in fired:
         print(f"  [🔔 主动提醒] {notification['message']}")
 
@@ -98,11 +104,20 @@ def _console_notification_sink(notification: dict) -> None:
     print("你: ", end="", flush=True)
 
 
-def _start_proactive_scheduler(config: ButlerConfig, rule_engine: RuleEngine) -> RuleScheduler:
+def _start_proactive_scheduler(
+    config: ButlerConfig, rule_engine: RuleEngine, routine_runner=None,
+    household_checker=None,
+) -> RuleScheduler:
+    from .scheduler import chain_ticks
+
     scheduler = RuleScheduler(
         rule_engine,
         interval_seconds=config.proactive_check_interval_seconds,
         sink=_console_notification_sink,
+        extra_tick=chain_ticks(
+            routine_runner.run_due if routine_runner is not None else None,
+            household_checker.run_due if household_checker is not None else None,
+        ),
     )
     scheduler.start()
     return scheduler
@@ -133,6 +148,7 @@ def _build_agent(
     memory_store: MemoryStore,
     confirmer=None,
     member_context=None,
+    household_store=None,
 ) -> tuple:
     tool_registry = ToolRegistry()
     for spec in build_home_tools(registry):
@@ -141,14 +157,44 @@ def _build_agent(
         tool_registry.register(spec)
     for spec in build_proactive_tools(memory_store, device_registry=registry):
         tool_registry.register(spec)
+    from .routines import RoutineRunner, build_routine_tools
+
+    for spec in build_routine_tools(memory_store, registry):
+        tool_registry.register(spec)
+    # 家庭生活服务（阶段 14.7）：食材管家 + 衣柜管家。独立分库（household.db），
+    # 通知仍走 MemoryStore 同一通道；天气未配置坐标时自动降级（无天气推荐）。
+    from .household import (
+        HouseholdCheckRunner,
+        HouseholdStore,
+        WeatherProvider,
+        build_pantry_tools,
+        build_wardrobe_tools,
+    )
+
+    # 允许外部注入同一实例（Web 装配复用），避免同库多连接写竞争
+    if household_store is None:
+        household_store = HouseholdStore(config.data_dir / "household.db")
+    weather = WeatherProvider(
+        lat=getattr(config, "weather_lat", ""),
+        lon=getattr(config, "weather_lon", ""),
+        city=getattr(config, "weather_city", ""),
+        timeout_seconds=getattr(config, "weather_timeout_seconds", 5.0),
+        cache_seconds=getattr(config, "weather_cache_seconds", 1800),
+    )
+    for spec in build_pantry_tools(household_store):
+        tool_registry.register(spec)
+    for spec in build_wardrobe_tools(household_store, weather, member_context=member_context):
+        tool_registry.register(spec)
 
     confirmer = confirmer or ConsoleConfirmer()
     executor = ToolExecutor(
         tool_registry,
         confirmer,
         confirmation_enabled=(config.confirmation_mode == CONFIRMATION_ALWAYS),
+        audit_sink=memory_store.add_audit,
     )
-    llm = build_llm(config, "main")
+    budget = TokenBudget(memory_store, config.daily_token_budget)
+    llm = build_llm(config, "main", token_budget=budget)
 
     def system_prompt_provider() -> str:
         # 声纹识别出的当前说话人（未识别/文本模式为 None，行为不变）
@@ -176,7 +222,9 @@ def _build_agent(
         system_prompt_provider=system_prompt_provider,
     )
     rule_engine = RuleEngine(registry, memory_store)
-    return agent, rule_engine, executor
+    routine_runner = RoutineRunner(registry, memory_store)
+    household_checker = HouseholdCheckRunner(household_store, memory_store)
+    return agent, rule_engine, executor, routine_runner, household_checker
 
 
 def main() -> int:
@@ -193,8 +241,13 @@ def main() -> int:
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
-    agent, rule_engine, _executor = _build_agent(config, registry, memory_store)
-    _start_proactive_scheduler(config, rule_engine)
+    agent, rule_engine, _executor, routine_runner, household_checker = _build_agent(
+        config, registry, memory_store
+    )
+    _start_proactive_scheduler(
+        config, rule_engine, routine_runner=routine_runner,
+        household_checker=household_checker,
+    )
 
     backend_label = (
         f"Home Assistant @ {config.ha_url}"
@@ -244,7 +297,7 @@ def main() -> int:
             mark = _STATUS_MARKS.get(event.status, "·")
             print(f"  [{mark} 工具] {event.tool}: {event.status} — {event.message}")
         print(f"管家: {result.reply}")
-        _deliver_notifications(rule_engine)
+        _deliver_notifications(rule_engine, household_checker)
 
 
 if __name__ == "__main__":

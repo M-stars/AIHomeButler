@@ -42,6 +42,16 @@ def main() -> int:
     print(f"  模型: {config.model} @ {config.base_url}")
     print(f"  API Key: {_redact(config.api_key)}")
     print(f"  设备后端: {config.device_backend} ｜ 确认模式: {config.confirmation_mode}")
+    # 家庭生活服务天气（阶段 14.7）：可选项，只提示不判失败
+    lat_set = bool(getattr(config, "weather_lat", ""))
+    lon_set = bool(getattr(config, "weather_lon", ""))
+    if lat_set and lon_set:
+        print(f"  天气服务: 已启用（Open-Meteo，{getattr(config, 'weather_city', '') or '未命名城市'}）")
+    elif lat_set or lon_set:
+        print(f"  {_WARN} 天气服务: 只配置了 {'WEATHER_LAT' if lat_set else 'WEATHER_LON'} 一项，"
+              "两项都填写才会启用（穿搭推荐当前不含天气）")
+    else:
+        print("  天气服务: 未启用（穿搭推荐不含天气；.env 配 WEATHER_LAT/WEATHER_LON 开启）")
 
     # 1. LLM 连通性
     print("\n[1/4] 大模型 API 连通性")

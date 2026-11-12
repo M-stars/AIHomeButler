@@ -4,15 +4,20 @@
   - 与 CLI 共用同一 Agent/工具/安全层；控制类操作的确认通过"确认队列"完成：
     对话请求阻塞等待用户在页面上批准/拒绝（超时按拒绝处理），绝不静默放行；
   - 同一时刻只允许一个对话/任务在执行（防止并发操作同一设备与上下文错乱）；
-  - API 无需登录仅限本机使用（默认绑定 127.0.0.1）；文档说明不要暴露到公网。
+  - API 全部要求访问令牌（评审 4.3）：.env 设 WEB_TOKEN 即用固定值，
+    留空则每次启动自动生成随机令牌并打印到控制台；令牌错误一律 401，
+    防止本机其他进程或浏览器里访问的恶意网页（CSRF）操控设备/读隐私。
 
 阶段 12 扩展：音色库管理 API（/api/voices*）与语音合成 API（/api/voice*）。
 语音栈为可选装配（voice_stack=None 时这些端点返回 503），不影响原有功能。
+
+阶段 14 扩展：审计日志（/api/audit，评审 4.4）与每日 token 预算展示（评审 4.5）。
 """
 from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import sys
 import tempfile
 import threading
@@ -21,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
@@ -142,8 +147,36 @@ def create_app(
     planner: Optional[PlanRunner] = None,
     voice_stack=None,
     speaker_identity=None,
+    auth_token: Optional[str] = None,
+    token_budget=None,
+    household_store=None,
 ) -> FastAPI:
     app = FastAPI(title="AI Home Butler", docs_url=None, redoc_url=None)
+    # 访问令牌：未显式传入（或配置为空）时自动生成随机值，启动时打印到控制台
+    app.state.auth_token = auth_token or secrets.token_urlsafe(24)
+
+    # ---- 访问鉴权（评审 4.3）：除静态外壳页外，所有请求必须携带正确令牌 ----
+    @app.middleware("http")
+    async def _require_token(request: Request, call_next):
+        if request.url.path != "/":
+            supplied = (
+                request.headers.get("X-Butler-Token")
+                or request.query_params.get("token")
+            )
+            if not supplied:
+                auth_header = request.headers.get("Authorization", "")
+                if auth_header.startswith("Bearer "):
+                    supplied = auth_header[len("Bearer "):]
+            if not supplied or not secrets.compare_digest(
+                supplied, app.state.auth_token
+            ):
+                return Response(
+                    content='{"detail":"未授权：缺少或错误的访问令牌"}',
+                    status_code=401,
+                    media_type="application/json",
+                )
+        return await call_next(request)
+
     state: Dict[str, Any] = {
         "agent_lock": threading.Lock(),
         "task_lock": threading.Lock(),
@@ -153,12 +186,15 @@ def create_app(
     def _device_views() -> List[Dict[str, Any]]:
         views = []
         for device in registry.list():
+            # actions：动态能力清单（阶段 14.5 自动发现推导），应用设备面板按它渲染控件
+            supported = getattr(device, "supported_actions", None)
             item = {
                 "id": device.info.id,
                 "name": device.info.name,
                 "type": device.info.device_type,
                 "area": device.info.area,
                 "available": device.is_available(),
+                "actions": list(supported()) if callable(supported) else [],
                 "state": None,
             }
             try:
@@ -181,6 +217,7 @@ def create_app(
             "confirmation_mode": config.confirmation_mode,
             # 旧配置桩可能没有该字段：语音后端仅作展示用，缺省按 sapi 呈现
             "tts_backend": getattr(config, "tts_backend", "sapi"),
+            "token_budget": token_budget.status() if token_budget is not None else None,
         }
 
     @app.post("/api/chat")
@@ -227,9 +264,20 @@ def create_app(
 
     @app.post("/api/confirmations/{confirmation_id}")
     def respond_confirmation(confirmation_id: str, payload: ConfirmationRequest):
+        # 先取摘要再应答：respond 后确认项会被等待线程移除
+        summary = next(
+            (c["summary"] for c in confirmer.pending() if c["id"] == confirmation_id),
+            confirmation_id,
+        )
         ok = confirmer.respond(confirmation_id, payload.approved)
         if not ok:
             raise HTTPException(status_code=404, detail="确认请求不存在或已处理")
+        memory_store.add_audit(
+            "confirmation.respond",
+            f"{'批准' if payload.approved else '拒绝'}：{summary}",
+            "ok" if payload.approved else "declined",
+            actor="user",
+        )
         return {"resolved": True, "approved": payload.approved}
 
     @app.get("/api/memories")
@@ -259,6 +307,117 @@ def create_app(
     @app.get("/api/tasks")
     def tasks():
         return {"tasks": memory_store.list_task_logs()}
+
+    @app.get("/api/audit")
+    def audit(limit: int = 100):
+        return {"audit": memory_store.list_audit(limit=limit)}
+
+    # ---- 家庭生活服务只读视图（阶段 14.7；写入口走对话工具，带确认与审计）----
+
+    @app.get("/api/pantry")
+    def pantry_view():
+        if household_store is None:
+            raise HTTPException(status_code=503, detail="家庭生活服务未装配")
+        from datetime import date
+
+        from .household import days_left
+
+        today = date.today()
+        items = []
+        for item in household_store.list_food(status="in_stock"):
+            left = days_left(item, today)
+            items.append({
+                "id": item["id"], "name": item["name"], "category": item["category"],
+                "quantity": item["quantity"], "added_date": item["added_date"],
+                "expires_in_days": item["expires_in_days"], "days_left": left,
+                "expired": left is not None and left < 0,
+            })
+        items.sort(key=lambda x: (x["days_left"] is None, x["days_left"] or 0))
+        return {"items": items, "count": len(items)}
+
+    @app.get("/api/wardrobe")
+    def wardrobe_view():
+        if household_store is None:
+            raise HTTPException(status_code=503, detail="家庭生活服务未装配")
+        from datetime import date
+
+        from .household import wash_policy
+
+        today = date.today()
+        garments = []
+        for g in household_store.list_garments():
+            policy = wash_policy(g)
+            garments.append({
+                "id": g["id"], "owner": g["owner"], "name": g["name"],
+                "category": g["category"], "warmth": g["warmth"], "status": g["status"],
+                "times_worn_since_wash": g["times_worn_since_wash"],
+                "last_wash_date": g["last_wash_date"],
+                "wash_interval_days": policy["interval"] if policy else None,
+            })
+        return {"garments": garments, "count": len(garments)}
+
+    # ---- 例行任务：预授权的定时设备动作（创建即授权，执行留审计）----
+
+    @app.get("/api/routines")
+    def routines_list():
+        return {"routines": memory_store.list_routines()}
+
+    @app.post("/api/routines")
+    def routines_create(body: dict):
+        from .proactive import normalize_days, _parse_hhmm
+        from .routines import _MAX_ACTIONS, validate_step
+
+        name = body.get("name")
+        actions = body.get("actions")
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=400, detail="name 不能为空")
+        if _parse_hhmm(body.get("time")) is None:
+            raise HTTPException(status_code=400, detail="time 需要是 24 小时制 HH:MM（如 07:00）")
+        if not isinstance(actions, list) or not actions:
+            raise HTTPException(status_code=400, detail="actions 需要至少一个动作")
+        if len(actions) > _MAX_ACTIONS:
+            raise HTTPException(status_code=400, detail=f"单个例行任务最多 {_MAX_ACTIONS} 个动作")
+        try:
+            days = normalize_days(body.get("days", "daily"))
+            validated = [validate_step(registry, step) for step in actions]
+        except (ValueError, DeviceError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        schedule: Dict[str, Any] = {"time": body["time"].strip(), "days": days}
+        if body.get("catchup_minutes") is not None:
+            catchup = body["catchup_minutes"]
+            if isinstance(catchup, bool) or not isinstance(catchup, int) or not 0 <= catchup <= 720:
+                raise HTTPException(status_code=400, detail="catchup_minutes 需要是 0-720 的整数")
+            schedule["catchup_minutes"] = catchup
+        routine_id = memory_store.add_routine(
+            name=name.strip(),
+            schedule=schedule,
+            actions=actions,
+            notify_on_success=bool(body.get("notify_on_success", False)),
+        )
+        memory_store.add_audit(
+            action="routine_create",
+            detail=f"#{routine_id} {name.strip()}（{len(actions)} 步，已逐动作预检）",
+            status="ok",
+        )
+        return {"routine_id": routine_id, "created": True, "steps": validated}
+
+    @app.delete("/api/routines/{routine_id}")
+    def routines_delete(routine_id: int):
+        if not memory_store.delete_routine(routine_id):
+            raise HTTPException(status_code=404, detail="例行任务不存在")
+        memory_store.add_audit(action="routine_delete", detail=f"#{routine_id}", status="ok")
+        return {"routine_id": routine_id, "deleted": True}
+
+    @app.post("/api/routines/{routine_id}/toggle")
+    def routines_toggle(routine_id: int):
+        current = next(
+            (r for r in memory_store.list_routines() if r["id"] == routine_id), None
+        )
+        if current is None:
+            raise HTTPException(status_code=404, detail="例行任务不存在")
+        enabled = not current["enabled"]
+        memory_store.set_routine_enabled(routine_id, enabled)
+        return {"routine_id": routine_id, "enabled": enabled}
 
     # ---- 语音：状态 / 音色库 / 合成（阶段 12，voice_stack 未装配时全部 503）----
 
@@ -303,6 +462,9 @@ def create_app(
             )
         except VoiceProfileError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        memory_store.add_audit(
+            "voice.create", f"音色「{profile['display_name']}」（{profile['voice_id']}）", "ok", actor="user"
+        )
         return {"voice": profile, "created": True}
 
     @app.post("/api/voices/preset")
@@ -326,6 +488,9 @@ def create_app(
             )
         except VoiceProfileError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        memory_store.add_audit(
+            "voice.create", f"预设音色「{profile['display_name']}」（{profile['voice_id']}）", "ok", actor="user"
+        )
         return {"voice": profile, "created": True}
 
     @app.post("/api/voices/{voice_id}/default")
@@ -358,6 +523,9 @@ def create_app(
             stack.cosyvoice_speaker.set_voice(None)  # 回退到模型预设音色
         # 删除音色时一并清除其生成缓存（隐私默认：档案删除则生成物随之清除）
         stack.cache.purge_voice(voice_id)
+        memory_store.add_audit(
+            "voice.delete", f"音色「{removed['display_name']}」（{voice_id}）及其生成缓存", "ok", actor="user"
+        )
         return {"deleted": True, "voice": removed}
 
     @app.post("/api/voices/{voice_id}/test")
@@ -430,6 +598,11 @@ def create_app(
             )
         except (SpeakerError, CosyVoiceClientError) as exc:
             raise _voice_http_error(exc)
+        memory_store.add_audit(
+            "speaker.enroll",
+            f"成员「{profile['display_name']}」（{profile['member_id']}）声纹注册，授权={consent_granted}",
+            "ok", actor="user",
+        )
         return {"speaker": profile, "created": True}
 
     @app.post("/api/speakers/{member_id}/voice")
@@ -459,6 +632,9 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc))
         if (speaker_identity.context.get() or {}).get("member_id") == member_id:
             speaker_identity.context.clear()
+        memory_store.add_audit(
+            "speaker.delete", f"成员「{removed['display_name']}」（{member_id}）声纹档案删除", "ok", actor="user"
+        )
         return {"deleted": True, "speaker": removed}
 
     @app.post("/api/voice/cache/clear")
@@ -473,30 +649,77 @@ def create_app(
 def build_web_app(config) -> FastAPI:
     """运行时装配（CLI 复用同一套组件构造逻辑）。"""
     from .cli import _build_agent, _build_registry
-    from .scheduler import RuleScheduler
+    from .household import HouseholdStore
+    from .scheduler import RuleScheduler, chain_ticks
+    from .token_budget import TokenBudget
     from .voice.assembly import build_speaker_identity, build_tts_stack
 
     registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
+
+    # 设备自动发现（阶段 14.5/14.6，仅 HA 后端）：周期刷新兜底 + WebSocket 事件
+    # 即时触发（state_changed → 去抖刷新），区域归属来自 WS 注册表查询。
+    # 全部 daemon 线程，任一环失败只降级（无区域/退回周期刷新），不影响主流程。
+    if (
+        getattr(config, "device_backend", "") == "homeassistant"
+        and getattr(config, "discovery_enabled", True)
+    ):
+        from .devices.discovery import DiscoveryRefresher
+        from .devices.homeassistant import get_ha_client
+
+        refresher = DiscoveryRefresher(
+            get_ha_client(config),
+            registry,
+            interval_seconds=getattr(config, "discovery_refresh_seconds", 300),
+            memory_store=memory_store,
+            exclusions_path=config.data_dir / "discovery_exclusions.json",
+        )
+        refresher.start()
+        if getattr(config, "discovery_refresh_seconds", 300) <= 0:
+            pass  # 用户显式关掉周期刷新：仅 WS 事件触发
+        try:
+            from .devices.ha_ws import HaWebSocket
+
+            ws_client = HaWebSocket(
+                config, on_state_changed=lambda _data: refresher.refresh_now()
+            )
+            ws_client.start()
+            if ws_client.wait_ready(8.0):
+                refresher.set_area_provider(ws_client.fetch_area_map)
+                refresher.refresh_now()  # 连接即按区域重建一次设备清单
+                _log.info("HA WebSocket 就绪：区域信息与新设备即时感知已启用")
+            else:
+                _log.warning("HA WebSocket 未就绪：区域为空，新设备感知退回周期刷新")
+        except Exception:
+            _log.exception("HA WebSocket 启动失败（退回周期刷新，不影响其他功能）")
+
     confirmer = WebConfirmer()
     voice_stack = build_tts_stack(config)
     speaker_identity = build_speaker_identity(config, voice_stack.client)
-    agent, rule_engine, executor = _build_agent(
+    # 同一 HouseholdStore 实例贯穿工具层与只读端点，避免同库多连接
+    household_store = HouseholdStore(config.data_dir / "household.db")
+    agent, rule_engine, executor, routine_runner, household_checker = _build_agent(
         config, registry, memory_store, confirmer=confirmer,
         member_context=speaker_identity.context,
+        household_store=household_store,
     )
 
     # 规划器与 Web 对话共用同一执行器：确认队列一致，防重放缓存也一致
     # （避免"对话刚开的灯"与"任务里的开灯"绕过彼此的重复执行保护）
     planner = PlanRunner.for_cli(config, registry, memory_store, executor=executor)
 
-    # 后台主动检查：不依赖前端轮询，通知落库后由页面定时刷新呈现
+    # 后台主动检查：不依赖前端轮询，通知落库后由页面定时刷新呈现；
+    # extra_tick 链挂例行任务执行器 + 家庭巡检（食材临期/衣物该洗，自保每日一次）
     scheduler = RuleScheduler(
         rule_engine,
         interval_seconds=config.proactive_check_interval_seconds,
         sink=None,
+        extra_tick=chain_ticks(routine_runner.run_due, household_checker.run_due),
     )
     scheduler.start()
+
+    # 每日 token 预算展示（用量统计本身在 llm_client 中强制执行）
+    token_budget = TokenBudget(memory_store, config.daily_token_budget)
 
     return create_app(
         config=config,
@@ -508,6 +731,9 @@ def build_web_app(config) -> FastAPI:
         planner=planner,
         voice_stack=voice_stack,
         speaker_identity=speaker_identity,
+        auth_token=config.web_token or None,
+        token_budget=token_budget,
+        household_store=household_store,
     )
 
 
@@ -529,7 +755,12 @@ def main() -> int:
         return 2
     setup_logging(config.log_dir, config.log_level)
     app = build_web_app(config)
-    print(f"AI Home Butler 界面: http://{args.host}:{args.port}/")
+    token = app.state.auth_token
+    print(f"AI Home Butler 界面: http://{args.host}:{args.port}/?token={token}")
+    if config.web_token:
+        print("（访问令牌来自 .env 的 WEB_TOKEN，页面首次打开后无需再带）")
+    else:
+        print("（访问令牌为本次启动自动生成的随机值；在 .env 设 WEB_TOKEN 可固定）")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 

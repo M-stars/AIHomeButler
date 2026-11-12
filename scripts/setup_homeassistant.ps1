@@ -1,4 +1,4 @@
-# AI Home Butler 一键部署 Home Assistant（需要管理员权限）
+﻿# AI Home Butler 一键部署 Home Assistant（需要管理员权限）
 # 使用时机：重启电脑完成 WSL2 安装之后，双击或在管理员 PowerShell 中执行本脚本。
 # 脚本做什么：
 #   1. 确保 WSL2 可用（Docker Desktop 引擎依赖）

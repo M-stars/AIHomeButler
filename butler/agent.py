@@ -75,6 +75,7 @@ class Agent:
         tool_registry: ToolRegistry,
         tool_executor: ToolExecutor,
         max_tool_calls_per_turn: int = 8,
+        max_tool_calls_per_response: int = 4,
         system_prompt_provider=None,
         logger: logging.Logger = None,
     ) -> None:
@@ -83,6 +84,9 @@ class Agent:
         self._registry = tool_registry
         self._executor = tool_executor
         self._max_calls = max(1, int(max_tool_calls_per_turn))
+        # 单次响应允许执行的 tool_calls 上限：模型抽风一次吐几十个调用时
+        # 只执行前 N 个，其余回填错误结果（消息必须一一对应，否则下次请求会被 API 拒绝）
+        self._max_per_response = max(1, int(max_tool_calls_per_response))
         self._prompt_provider = system_prompt_provider
         self._log = logger or _log
 
@@ -104,10 +108,28 @@ class Agent:
 
             if response.tool_calls:
                 self._conv.add_assistant_tool_calls(response.content or "", response.tool_calls)
-                for tool_call in response.tool_calls:
+                overflow = response.tool_calls[self._max_per_response:]
+                for tool_call in response.tool_calls[: self._max_per_response]:
                     result = self._executor.execute(tool_call.name, tool_call.arguments)
                     events.append(ToolEvent(tool_call.name, result.status, result.message))
                     self._conv.add_tool_result(tool_call.id, result.to_payload())
+                for tool_call in overflow:
+                    self._log.warning(
+                        "单响应工具调用数超过上限 %s，%r 未执行", self._max_per_response, tool_call.name
+                    )
+                    events.append(ToolEvent(
+                        tool_call.name, "error",
+                        f"单次响应携带的工具调用超过上限（{self._max_per_response} 个），本次调用未执行",
+                    ))
+                    self._conv.add_tool_result(tool_call.id, {
+                        "status": "error",
+                        "stage": "cancelled",
+                        "message": (
+                            f"单次响应携带的工具调用超过上限（{self._max_per_response} 个），"
+                            "该调用未执行。请精简需求或分多轮完成。"
+                        ),
+                        "data": {},
+                    })
                 continue
 
             reply = response.content or "（模型未返回内容，请重试或换个说法）"

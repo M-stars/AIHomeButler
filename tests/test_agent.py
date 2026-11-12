@@ -123,3 +123,31 @@ def test_multi_turn_context_preserved(tool_registry):
     third_call_messages = llm.calls[2]["messages"]
     contents = [m.get("content") or "" for m in third_call_messages]
     assert any("客厅灯目前是关着的" in c for c in contents)
+
+
+def test_single_response_tool_calls_capped(tool_registry):
+    """模型一次响应携带超量 tool_calls：只执行前 N 个，其余回填错误结果。"""
+    from butler.llm_client import LLMResponse, ToolCall
+    oversized = LLMResponse(
+        content=None,
+        tool_calls=[
+            ToolCall(id=f"c{i}", name="get_sensor_readings", arguments="{}")
+            for i in range(6)
+        ],
+        usage={},
+    )
+    llm = FakeLLM([oversized, text_response("已完成查询，超出上限的调用未执行。")])
+    agent = make_agent(llm, tool_registry, max_tool_calls_per_response=4)
+    result = agent.process("读一下传感器")
+    assert result.reply.startswith("已完成查询")
+
+    executed = [e for e in result.tool_events if e.status == "ok"]
+    skipped = [e for e in result.tool_events if e.status == "error"]
+    assert len(executed) == 4
+    assert len(skipped) == 2
+    assert "上限" in skipped[0].message
+    # 每个 tool_call（含被截断的）都必须有对应 tool 结果消息，否则下一次 API 请求会被拒绝
+    tool_msgs = [m for m in llm.calls[-1]["messages"] if m["role"] == "tool"]
+    assert len(tool_msgs) == 6
+    last_payload = json.loads(tool_msgs[-1]["content"])
+    assert last_payload["status"] == "error"

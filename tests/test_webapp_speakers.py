@@ -48,6 +48,7 @@ def build_app(tmp_path, monkeypatch, fake=None, enabled=True):
         memory_store=SimpleNamespace(
             list=lambda *a, **k: [], add=lambda *a, **k: "1", delete=lambda mid: True,
             list_notifications=lambda: [], list_task_logs=lambda: [],
+            add_audit=lambda *a, **k: 1,
         ),
         agent=SimpleNamespace(process=lambda t: SimpleNamespace(
             reply="r", tool_events=[], stopped_by_limit=False)),
@@ -56,8 +57,9 @@ def build_app(tmp_path, monkeypatch, fake=None, enabled=True):
         planner=None,
         voice_stack=SimpleNamespace(client=fake),
         speaker_identity=identity,
+        auth_token="test-token",
     )
-    return TestClient(app), identity, fake
+    return TestClient(app, headers={"X-Butler-Token": "test-token"}), identity, fake
 
 
 WAV_BYTES = pcm_to_wav(b"\x01\x02" * 4000, 24000)
@@ -166,6 +168,7 @@ def test_speakers_503_without_identity(tmp_path, monkeypatch):
         memory_store=SimpleNamespace(
             list=lambda *a, **k: [], add=lambda *a, **k: "1", delete=lambda mid: True,
             list_notifications=lambda: [], list_task_logs=lambda: [],
+            add_audit=lambda *a, **k: 1,
         ),
         agent=SimpleNamespace(process=lambda t: SimpleNamespace(
             reply="r", tool_events=[], stopped_by_limit=False)),
@@ -174,8 +177,9 @@ def test_speakers_503_without_identity(tmp_path, monkeypatch):
         planner=None,
         voice_stack=None,
         speaker_identity=None,
+        auth_token="test-token",
     )
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-Butler-Token": "test-token"})
     assert client.get("/api/speakers").status_code == 503
     # 缺必填字段时 FastAPI 参数校验(422)先于装配检查(503)触发，均为拒绝
     assert client.post("/api/speakers", data={"display_name": "x"}).status_code in (422, 503)

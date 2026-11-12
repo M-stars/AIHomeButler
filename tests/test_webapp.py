@@ -14,6 +14,8 @@ from butler.tools.executor import ToolExecutor
 from butler.webapp import WebConfirmer, create_app
 from helpers import FakeLLM, final_after_tool, text_response, tool_call_response
 
+_AUTH = {"X-Butler-Token": "test-token"}
+
 
 class _Cfg:
     model = "test-model"
@@ -36,12 +38,13 @@ def web(tmp_path, registry, tool_registry):
         agent=agent,
         rule_engine=engine,
         confirmer=confirmer,
+        auth_token="test-token",
     )
     return {"app": app, "llm": llm, "memory": memory, "confirmer": confirmer}
 
 
 def test_overview_lists_devices(web):
-    client = TestClient(web["app"])
+    client = TestClient(web["app"], headers=_AUTH)
     data = client.get("/api/overview").json()
     ids = [d["id"] for d in data["devices"]]
     assert "light.living_room" in ids
@@ -50,7 +53,7 @@ def test_overview_lists_devices(web):
 
 def test_chat_simple_text(web):
     web["llm"] and web["llm"]._steps.append(text_response("你好，我是管家。"))
-    client = TestClient(web["app"])
+    client = TestClient(web["app"], headers=_AUTH)
     data = client.post("/api/chat", json={"text": "你好"}).json()
     assert data["reply"] == "你好，我是管家。"
 
@@ -67,7 +70,7 @@ def test_chat_control_flow_with_web_confirmation(web, registry):
             final_after_tool(),
         ]
     )
-    client = TestClient(web["app"])
+    client = TestClient(web["app"], headers=_AUTH)
 
     chat_result = {}
 
@@ -78,7 +81,7 @@ def test_chat_control_flow_with_web_confirmation(web, registry):
     thread = threading.Thread(target=do_chat, daemon=True)
     thread.start()
 
-    poller = TestClient(web["app"])
+    poller = TestClient(web["app"], headers=_AUTH)
     deadline = time.time() + 6
     confirmations = []
     while time.time() < deadline:
@@ -110,7 +113,7 @@ def test_confirmation_rejection_blocks_execution(web, registry):
             final_after_tool(expected_status="declined"),
         ]
     )
-    client = TestClient(web["app"])
+    client = TestClient(web["app"], headers=_AUTH)
     chat_result = {}
 
     def do_chat():
@@ -118,7 +121,7 @@ def test_confirmation_rejection_blocks_execution(web, registry):
 
     thread = threading.Thread(target=do_chat, daemon=True)
     thread.start()
-    poller = TestClient(web["app"])
+    poller = TestClient(web["app"], headers=_AUTH)
     deadline = time.time() + 6
     confirmations = []
     while time.time() < deadline:
@@ -142,7 +145,7 @@ def test_concurrent_chat_returns_409(web):
         return text_response("慢慢回答")
 
     web["llm"]._steps.append(slow_step)
-    client = TestClient(web["app"])
+    client = TestClient(web["app"], headers=_AUTH)
     first = {}
     thread = threading.Thread(
         target=lambda: first.update(resp=client.post("/api/chat", json={"text": "第一句"})),
@@ -157,7 +160,7 @@ def test_concurrent_chat_returns_409(web):
 
 
 def test_memory_api_crud(web):
-    client = TestClient(web["app"])
+    client = TestClient(web["app"], headers=_AUTH)
     created = client.post(
         "/api/memories", json={"kind": "preference", "content": "周末晚起"}
     ).json()
@@ -177,6 +180,25 @@ def test_notifications_endpoint_lists_stored_notifications(web, registry):
     )
     registry.get("light.living_room").set_unavailable(True)
     web["memory"].add_notification(1, "离线提醒", "设备 客厅灯（light.living_room）处于离线状态", "warning")
-    client = TestClient(web["app"])
+    client = TestClient(web["app"], headers=_AUTH)
     data = client.get("/api/notifications").json()
     assert any("离线" in n["message"] for n in data["notifications"])
+
+
+def test_api_requires_token(web):
+    """除静态外壳页外，所有 API 必须携带正确令牌（评审 4.3）。"""
+    anonymous = TestClient(web["app"])
+    assert anonymous.get("/").status_code == 200  # 外壳页放行（无数据）
+    assert anonymous.get("/api/overview").status_code == 401
+    wrong = TestClient(web["app"], headers={"X-Butler-Token": "wrong-token"})
+    assert wrong.get("/api/overview").status_code == 401
+    ok = TestClient(web["app"], headers=_AUTH)
+    assert ok.get("/api/overview").status_code == 200
+
+
+def test_audit_endpoint_lists_actions(web):
+    """审计可经 /api/audit 读取；记忆增删改由存储层自动记录（评审 4.4）。"""
+    web["memory"].add("preference", "审计样例记忆")
+    client = TestClient(web["app"], headers=_AUTH)
+    actions = [a["action"] for a in client.get("/api/audit").json()["audit"]]
+    assert "memory.add" in actions
