@@ -23,11 +23,13 @@ _VALID_CONFIRMATION_MODES = (CONFIRMATION_ALWAYS, CONFIRMATION_NEVER)
 
 BACKEND_SIMULATED = "simulated"
 BACKEND_HOMEASSISTANT = "homeassistant"
-_VALID_BACKENDS = (BACKEND_SIMULATED, BACKEND_HOMEASSISTANT)
+BACKEND_GPIO = "gpio"  # 树莓派 40-pin IO 直连硬件（仅 Pi 上可用，见 butler/devices/gpio.py）
+_VALID_BACKENDS = (BACKEND_SIMULATED, BACKEND_HOMEASSISTANT, BACKEND_GPIO)
 
-TTS_BACKEND_SAPI = "sapi"
+TTS_BACKEND_SAPI = "sapi"  # Windows SAPI5 / Linux espeak（pyttsx3 自动按平台选驱动）
 TTS_BACKEND_COSYVOICE = "cosyvoice"
-_VALID_TTS_BACKENDS = (TTS_BACKEND_SAPI, TTS_BACKEND_COSYVOICE)
+TTS_BACKEND_ESPEAK = "espeak"  # sapi 的 Linux 别名（树莓派：sudo apt install espeak-ng）
+_VALID_TTS_BACKENDS = (TTS_BACKEND_SAPI, TTS_BACKEND_COSYVOICE, TTS_BACKEND_ESPEAK)
 
 
 class ConfigError(Exception):
@@ -69,6 +71,8 @@ class ButlerConfig:
     ha_token: str
     ha_timeout_seconds: float
     ha_devices_file: Path
+    # GPIO 直连后端（树莓派）：设备清单文件（BCM 引脚配置），仅 DEVICE_BACKEND=gpio 时使用
+    gpio_devices_file: Path
     # 设备自动发现（阶段 14.5）：默认开，运行时枚举 HA 实体并推导能力；
     # 关闭则回退旧白名单文件 ha_devices.json。刷新间隔 0 = 不做周期刷新。
     discovery_enabled: bool
@@ -184,6 +188,9 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         )
     ha_url = os.environ.get("HA_URL", "http://localhost:8123").strip()
     ha_token = os.environ.get("HA_TOKEN", "").strip()
+    gpio_devices_file = PROJECT_ROOT / os.environ.get(
+        "GPIO_DEVICES_FILE", "config/gpio_devices.json"
+    ).strip()
     if device_backend == BACKEND_HOMEASSISTANT:
         # fail-fast：切到真实平台前必须给齐凭证，绝不带默认值裸跑
         if not ha_token:
@@ -193,6 +200,14 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
             )
         if not ha_url.lower().startswith(("http://", "https://")):
             raise ConfigError(f"配置 HA_URL 必须以 http(s):// 开头，当前值：{ha_url!r}")
+    if device_backend == BACKEND_GPIO:
+        # fail-fast：GPIO 直连必须先提供设备清单（复制 example 后按接线修改）
+        if not gpio_devices_file.exists():
+            raise ConfigError(
+                f"DEVICE_BACKEND=gpio 时设备清单必须存在：{gpio_devices_file}。"
+                "请复制 config/gpio_devices.example.json 为 config/gpio_devices.json"
+                "并按实际接线修改（见 docs/PI_GPIO_TESTING.md）"
+            )
 
     data_dir = PROJECT_ROOT / os.environ.get("DATA_DIR", "data").strip()
     wake_model_dir_env = os.environ.get("WAKEWORD_MODEL_DIR", "").strip()
@@ -226,6 +241,7 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         ha_token=ha_token,
         ha_timeout_seconds=_get_float("HA_TIMEOUT_SECONDS", 10.0),
         ha_devices_file=PROJECT_ROOT / "config" / "ha_devices.json",
+        gpio_devices_file=gpio_devices_file,
         # 自动发现（仅 homeassistant 后端有意义）：默认开；0 回退白名单文件
         discovery_enabled=os.environ.get("DISCOVERY_ENABLED", "1").strip().lower()
         not in ("0", "false", "no", "off"),

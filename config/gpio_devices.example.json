@@ -1,0 +1,11 @@
+{
+  "_说明": "树莓派 GPIO 直连设备清单（DEVICE_BACKEND=gpio 时使用）。复制为 config/gpio_devices.json 后按实际接线修改。引脚编号统一 BCM（GPIO17=物理引脚 11，见 docs/PI_GPIO_TESTING.md 接线表）。支持 type：light（pwm=true 可调亮度）/ fan（三档 PWM）/ switch（继电器）/ sensor（kind=dht11/dht22/ds18b20/motion）。安全约定：所有输出引脚上电默认关闭；驱动继电器/电机请经三极管或继电器模块，勿直接从 GPIO 拉负载。",
+  "devices": [
+    { "id": "light.desk_lamp", "name": "书桌台灯", "type": "light", "area": "书房", "pin": 17, "active_high": true, "pwm": false },
+    { "id": "light.strip", "name": "灯带", "type": "light", "area": "客厅", "pin": 18, "pwm": true, "initial_brightness": 80 },
+    { "id": "fan.bench", "name": "测试风扇", "type": "fan", "area": "书房", "pin": 22, "speeds": { "low": 0.35, "medium": 0.65, "high": 1.0 } },
+    { "id": "switch.relay_1", "name": "继电器1", "type": "switch", "area": "书房", "pin": 23, "active_high": false },
+    { "id": "sensor.room_climate", "name": "室温湿度", "type": "sensor", "area": "书房", "kind": "dht22", "pin": 4 },
+    { "id": "sensor.room_motion", "name": "人体感应", "type": "sensor", "area": "书房", "kind": "motion", "pin": 27 }
+  ]
+}

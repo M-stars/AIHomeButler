@@ -16,7 +16,11 @@ from butler.household.weather import WeatherProvider, WeatherUnavailable
 from butler.tools.executor import ToolExecutor
 from butler.tools.registry import ToolRegistry
 
-TODAY = date(2026, 11, 1)
+# 工具记账用真实 date.today() 打时间戳：这里必须同源，否则日期一过测试就烂
+# 纯函数测试用的固定日期（其输入日期相对它硬编码）
+FIXED_TODAY = date(2026, 11, 1)
+# 工具级测试与生产 date.today() 同源
+TODAY = date.today()
 
 
 class FakeMemberContext:
@@ -86,31 +90,31 @@ def test_evaluate_wash_signals():
     wears_exceeded = {"id": 1, "name": "白衬衫", "owner": "小星", "category": "上衣",
                       "wash_interval_days": None, "times_worn_since_wash": 3,
                       "last_wash_date": "2026-10-30"}
-    signal = evaluate_wash(wears_exceeded, TODAY)
+    signal = evaluate_wash(wears_exceeded, FIXED_TODAY)
     assert signal is not None
     assert "已连穿 3 次" in signal["message"]
 
     days_exceeded = {"id": 2, "name": "外套", "owner": "爷爷", "category": "外套",
                      "wash_interval_days": None, "times_worn_since_wash": 1,
                      "last_wash_date": "2026-10-01"}
-    signal = evaluate_wash(days_exceeded, TODAY)
+    signal = evaluate_wash(days_exceeded, FIXED_TODAY)
     assert "距上次洗涤 31 天" in signal["message"]
 
     clean_recent = {"id": 3, "name": "新裤子", "owner": "小星", "category": "裤子",
                     "wash_interval_days": None, "times_worn_since_wash": 1,
                     "last_wash_date": "2026-10-31"}
-    assert evaluate_wash(clean_recent, TODAY) is None
+    assert evaluate_wash(clean_recent, FIXED_TODAY) is None
 
     # 从未洗涤也从未穿着：没有起算点，不打扰
     virgin = {"id": 4, "name": "新衣", "owner": "小星", "category": "上衣",
               "wash_interval_days": None, "times_worn_since_wash": 0,
               "last_wash_date": None}
-    assert evaluate_wash(virgin, TODAY) is None
+    assert evaluate_wash(virgin, FIXED_TODAY) is None
 
     # 配饰不跟踪
     assert evaluate_wash({"id": 5, "name": "围巾", "owner": "小星", "category": "配饰",
                           "times_worn_since_wash": 99, "last_wash_date": "2020-01-01"},
-                         TODAY) is None
+                         FIXED_TODAY) is None
 
 
 def test_resolve_owner_priority():

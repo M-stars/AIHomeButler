@@ -1,7 +1,8 @@
 """语音会话入口：python -m butler.voice
 
-语音输出默认启用（Windows SAPI5 离线合成）；配置 TTS_BACKEND=cosyvoice 时
-改用 CosyVoice 官方服务端合成（含音色库克隆音色），失败按配置降级回 SAPI。
+语音输出默认启用（本地离线合成：Windows SAPI5 / Linux 树莓派 espeak）；
+配置 TTS_BACKEND=cosyvoice 时改用 CosyVoice 官方服务端合成（含音色库克隆音色），
+失败按配置降级回本地 TTS。
 语音输入两种方式：
   1. 默认：键盘输入文字（纯语音输出模式，无需任何音频采集依赖）；
   2. --mic：麦克风采集 + faster-whisper 识别（需 pip install faster-whisper sounddevice）。
@@ -39,6 +40,15 @@ def _build_transcriber(enabled: bool) -> Transcriber:
     if not enabled:
         return None
     return WhisperTranscriber()
+
+
+def _local_tts_label() -> str:
+    """本地 TTS 的平台文案（Windows=SAPI5，Linux/macOS=pyttsx3 对应驱动）。"""
+    if sys.platform == "win32":
+        return "Windows SAPI5"
+    if sys.platform == "darwin":
+        return "macOS say（pyttsx3）"
+    return "Linux espeak（sudo apt install espeak-ng）"
 
 
 def _speak_safely(speaker: Speaker, text: str) -> None:
@@ -116,9 +126,10 @@ def main() -> int:
                 voice_name = default_voice["display_name"] if default_voice else "模型预设音色"
                 print(f"语音后端: CosyVoice（{config.cosyvoice_url}）默认音色: {voice_name}")
                 if stack.fallback_speaker is not None:
-                    print("CosyVoice 不可用时自动降级到 Windows SAPI（降级会打印提示）")
+                    print("CosyVoice 不可用时自动降级到本地 TTS（降级会打印提示）")
             else:
-                print("语音后端: Windows SAPI5（如需 CosyVoice 克隆音色，在 .env 设置 TTS_BACKEND=cosyvoice）")
+                print(f"语音后端: 本地 TTS（{_local_tts_label()}；"
+                      "如需 CosyVoice 克隆音色，在 .env 设置 TTS_BACKEND=cosyvoice）")
     default_voice_id = stack.cosyvoice_speaker.voice_id if stack else None
 
     transcriber = None
@@ -159,7 +170,7 @@ def main() -> int:
     elif using_cosyvoice:
         print("语音输出: CosyVoice（默认音色见上）")
     else:
-        print("语音输出: Windows SAPI5")
+        print(f"语音输出: 本地 TTS（{_local_tts_label()}）")
     if identity and identity.enabled:
         members = identity.registry.list()
         print(f"声纹识别: 开启（{len(members)} 位成员，阈值 {identity.threshold:.2f}）"

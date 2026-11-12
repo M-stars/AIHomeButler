@@ -3,6 +3,10 @@
 更新日期：2026-11-01 ｜ 状态：**文档与脚本就绪，待硬件到位实测**（含阶段 14.7 家庭生活服务；
 跑通后回填实测记录）
 
+> GPIO 直连硬件（`DEVICE_BACKEND=gpio`，不经 HA 直接用 40-pin IO 调控 LED/继电器/
+> 风扇/传感器）：见 [docs/PI_GPIO_TESTING.md](PI_GPIO_TESTING.md)（pi_ceshi 分支新增，
+> 部署后执行 `bash scripts/pi/05_gpio.sh` 完成依赖与配置自检）。
+
 目标拓扑（见部署拓扑决策）：**Pi = 管家进程 + HA 容器 + 声纹注册表**；
 阿里云 2C2G = 穿透/推送/监控（阶段 17）；CosyVoice 语音服务留 Windows PC（跨机 HTTP 调用）。
 

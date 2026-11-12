@@ -9,6 +9,7 @@ from datetime import datetime
 
 from .agent import Agent, build_system_prompt
 from .config import (
+    BACKEND_GPIO,
     BACKEND_HOMEASSISTANT,
     CONFIRMATION_ALWAYS,
     CONFIRMATION_NEVER,
@@ -134,11 +135,15 @@ def _run_task(config: ButlerConfig, registry: DeviceRegistry, memory_store: Memo
 
 
 def _build_registry(config: ButlerConfig) -> DeviceRegistry:
-    """按配置选择设备后端：模拟（默认，安全）或 Home Assistant（真实设备）。"""
+    """按配置选择设备后端：模拟（默认，安全）/ Home Assistant / 树莓派 GPIO 直连。"""
     if config.device_backend == BACKEND_HOMEASSISTANT:
         from .devices.homeassistant import build_ha_registry
 
         return build_ha_registry(config)
+    if config.device_backend == BACKEND_GPIO:
+        from .devices.gpio import build_gpio_registry
+
+        return build_gpio_registry(config)
     return build_default_devices(config.data_dir)
 
 
