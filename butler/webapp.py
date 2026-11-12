@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import secrets
 import sys
@@ -42,6 +43,7 @@ from .voice.speakers import SpeakerError
 from .voice.tts import VoiceError
 
 _WEB_DIR = Path(__file__).parent / "web"
+_log = logging.getLogger("butler.webapp")
 
 
 class WebConfirmer:
