@@ -16,22 +16,28 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import logging
 import os
+import queue
 import secrets
 import sys
 import tempfile
 import threading
+import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .devices.base import DeviceError
+from .devices.base import ControllableDevice, DeviceError, DeviceNotFound, StateUnknownError
 from .devices.registry import DeviceRegistry
 from .memory.store import MemoryStore
 from .planner import PlanRunner
@@ -45,14 +51,135 @@ from .voice.tts import VoiceError
 _WEB_DIR = Path(__file__).parent / "web"
 _log = logging.getLogger("butler.webapp")
 
+_PERSONA_PRESETS: List[Dict[str, str]] = [
+    {
+        "id": "default",
+        "name": "默认管家",
+        "prompt": "",
+        "description": "沉稳、简洁、自然的家庭 AI 管家默认风格。",
+    },
+    {
+        "id": "concise",
+        "name": "极简高效",
+        "prompt": "回复尽量控制在 1-2 句话内，先给结果和关键数据，省略寒暄和铺垫。",
+        "description": "适合高频指令控制，直奔主题。",
+    },
+    {
+        "id": "elder",
+        "name": "长辈关怀",
+        "prompt": "语气亲切温和、通俗易懂，避免英文缩写和专业术语，汇报温度和设备状态时顺带给出贴心提醒。",
+        "description": "适合家中长辈使用，清晰易懂。",
+    },
+    {
+        "id": "warm",
+        "name": "温暖陪伴",
+        "prompt": "语气温柔体贴、有生活气息，在严谨执行设备指令的同时给予轻松自然的日常回应。",
+        "description": "更有温度的家庭日常交互体验。",
+    },
+]
+
+
+class EventHub:
+    """线程安全的内存 SSE 事件广播器（用于实时推送安全流水线/确认/设备变更事件）。"""
+
+    def __init__(self, max_queue_size: int = 128) -> None:
+        self._lock = threading.Lock()
+        self._subscribers: List[queue.Queue] = []
+        self._max_queue_size = max_queue_size
+
+    def subscribe(self) -> queue.Queue:
+        q: queue.Queue = queue.Queue(maxsize=self._max_queue_size)
+        with self._lock:
+            self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self._lock:
+            if q in self._subscribers:
+                self._subscribers.remove(q)
+
+    def publish(self, event_type: str, data: Dict[str, Any]) -> None:
+        payload = {
+            "event": event_type,
+            "data": data,
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        with self._lock:
+            subs = list(self._subscribers)
+        for q in subs:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(payload)
+                except queue.Empty:
+                    pass
+
+
+class PairingManager:
+    """局域网配对码管理器（6 位数字、限时 10 分钟、最多 3 次尝试、一次性消费）。"""
+
+    def __init__(self, ttl_seconds: int = 600, max_attempts: int = 3) -> None:
+        self._ttl = ttl_seconds
+        self._max_attempts = max_attempts
+        self._lock = threading.Lock()
+        self._code: Optional[str] = None
+        self._expires_monotonic: float = 0.0
+        self._expires_at_iso: str = ""
+        self._attempts_left: int = 0
+
+    def start(self) -> Dict[str, Any]:
+        with self._lock:
+            self._code = f"{secrets.randbelow(1_000_000):06d}"
+            self._expires_monotonic = time.monotonic() + self._ttl
+            self._expires_at_iso = (
+                datetime.now().astimezone() + timedelta(seconds=self._ttl)
+            ).isoformat(timespec="seconds")
+            self._attempts_left = self._max_attempts
+            return {
+                "code": self._code,
+                "expires_in_seconds": self._ttl,
+                "expires_at": self._expires_at_iso,
+                "max_attempts": self._max_attempts,
+            }
+
+    def verify_and_consume(self, code: str) -> tuple:
+        """返回 (ok: bool, error_message: str)。"""
+        supplied = (code or "").strip()
+        with self._lock:
+            if not self._code:
+                return False, "当前没有有效的配对码，请先在管家端生成配对码"
+            if time.monotonic() > self._expires_monotonic:
+                self._code = None
+                return False, "配对码已过期，请重新生成"
+            if not supplied or not secrets.compare_digest(supplied, self._code):
+                self._attempts_left -= 1
+                if self._attempts_left <= 0:
+                    self._code = None
+                    return False, "配对码错误次数过多，已自动作废，请重新生成"
+                return False, f"配对码错误（剩余 {self._attempts_left} 次机会）"
+            self._code = None
+            return True, ""
+
 
 class WebConfirmer:
     """Web 端确认器：把确认请求放入队列，等待页面批准/拒绝；超时按拒绝处理。"""
 
-    def __init__(self, timeout_seconds: float = 120.0) -> None:
+    def __init__(
+        self,
+        timeout_seconds: float = 120.0,
+        on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ) -> None:
         self._timeout = float(timeout_seconds)
         self._lock = threading.Lock()
         self._pending: List[Dict[str, Any]] = []
+        self._on_event = on_event
+
+    def set_event_callback(
+        self, on_event: Optional[Callable[[str, Dict[str, Any]], None]]
+    ) -> None:
+        self._on_event = on_event
 
     def confirm(self, summary: str, arguments: Dict[str, Any]) -> bool:
         item = {
@@ -65,6 +192,11 @@ class WebConfirmer:
         }
         with self._lock:
             self._pending.append(item)
+        if self._on_event is not None:
+            self._on_event(
+                "confirmation_pending",
+                {k: v for k, v in item.items() if k != "event"},
+            )
         resolved = item["event"].wait(self._timeout)
         with self._lock:
             if item in self._pending:
@@ -73,6 +205,11 @@ class WebConfirmer:
             # 超时且确实无人应答才按拒绝处理；若应答恰好落在超时临界点
             # （wait 已返回但 respond 已写入结果），以写入结果为准（P2 竞态修复）
             item["approved"] = False
+        if self._on_event is not None:
+            self._on_event(
+                "confirmation_resolved",
+                {"id": item["id"], "approved": bool(item["approved"]), "summary": summary},
+            )
         return bool(item["approved"])
 
     def pending(self) -> List[Dict[str, Any]]:
@@ -121,6 +258,21 @@ class ConsentRequest(BaseModel):
     granted: bool
 
 
+class DeviceCommandRequest(BaseModel):
+    action: str
+    value: Optional[Any] = None
+
+
+class PairConfirmRequest(BaseModel):
+    code: str
+    device_name: str
+    platform: str = "unknown"
+
+
+class PersonaUpdateRequest(BaseModel):
+    persona: str = ""
+
+
 def _voice_http_error(exc: Exception) -> HTTPException:
     """把语音层异常映射为 HTTP 状态码与用户可读信息。"""
     if isinstance(exc, (VoiceProfileError, SpeakerError)):
@@ -152,32 +304,89 @@ def create_app(
     auth_token: Optional[str] = None,
     token_budget=None,
     household_store=None,
+    executor: Optional[ToolExecutor] = None,
+    ha_client=None,
 ) -> FastAPI:
     app = FastAPI(title="AI Home Butler", docs_url=None, redoc_url=None)
     # 访问令牌：未显式传入（或配置为空）时自动生成随机值，启动时打印到控制台
     app.state.auth_token = auth_token or secrets.token_urlsafe(24)
+    started_at = time.monotonic()
 
-    # ---- 访问鉴权（评审 4.3）：除静态外壳页外，所有请求必须携带正确令牌 ----
+    event_hub = EventHub()
+    pairing_mgr = PairingManager()
+    app.state.event_hub = event_hub
+    app.state.pairing_mgr = pairing_mgr
+
+    # 挂载确认器与执行器实时事件（供 SSE 安全流水线面板与 App/小程序推送）
+    if hasattr(confirmer, "set_event_callback"):
+        confirmer.set_event_callback(event_hub.publish)
+    if executor is not None and hasattr(executor, "set_event_listener"):
+        executor.set_event_listener(lambda ev: event_hub.publish("pipeline_step", ev))
+
+    # CORS：为 App（Capacitor/WebView）/ 小程序 / 本地开发调试预留跨源支持
+    # 不启用 allow_credentials（不用 Cookie，全部显式令牌头，杜绝 CSRF）
+    raw_cors = (getattr(config, "web_cors_origins", "") or "").strip()
+    if raw_cors:
+        cors_origins = ["*"] if raw_cors == "*" else [
+            o.strip() for o in raw_cors.split(",") if o.strip()
+        ]
+    else:
+        cors_origins = ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Butler-Token"],
+    )
+
+    _PUBLIC_PATHS = {"/", "/manifest.json", "/api/health", "/api/pair/confirm"}
+
+    # ---- 多令牌访问鉴权（主令牌 + 已配对 App/小程序设备令牌）----
     @app.middleware("http")
     async def _require_token(request: Request, call_next):
-        if request.url.path != "/":
-            supplied = (
-                request.headers.get("X-Butler-Token")
-                or request.query_params.get("token")
-            )
-            if not supplied:
-                auth_header = request.headers.get("Authorization", "")
-                if auth_header.startswith("Bearer "):
-                    supplied = auth_header[len("Bearer "):]
-            if not supplied or not secrets.compare_digest(
-                supplied, app.state.auth_token
-            ):
-                return Response(
-                    content='{"detail":"未授权：缺少或错误的访问令牌"}',
-                    status_code=401,
-                    media_type="application/json",
-                )
-        return await call_next(request)
+        path = request.url.path
+        if (
+            request.method == "OPTIONS"
+            or path in _PUBLIC_PATHS
+            or path.startswith("/static/")
+        ):
+            return await call_next(request)
+
+        supplied = (
+            request.headers.get("X-Butler-Token")
+            or request.query_params.get("token")
+        )
+        if not supplied:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                supplied = auth_header[len("Bearer "):]
+
+        if supplied and secrets.compare_digest(supplied, app.state.auth_token):
+            request.state.client_actor = "user"
+            request.state.is_primary_token = True
+            return await call_next(request)
+
+        paired = (
+            memory_store.verify_pairing_token(supplied)
+            if supplied and hasattr(memory_store, "verify_pairing_token")
+            else None
+        )
+        if paired is not None:
+            request.state.client_actor = f"device_app:{paired['device_id']}"
+            request.state.is_primary_token = False
+            request.state.paired_device = paired
+            return await call_next(request)
+
+        return Response(
+            content='{"detail":"未授权：缺少或错误的访问令牌"}',
+            status_code=401,
+            media_type="application/json",
+        )
+
+    static_dir = _WEB_DIR / "static"
+    if static_dir.is_dir():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     state: Dict[str, Any] = {
         "agent_lock": threading.Lock(),
@@ -210,6 +419,93 @@ def create_app(
     def index():
         return FileResponse(_WEB_DIR / "index.html")
 
+    @app.get("/manifest.json")
+    def pwa_manifest():
+        manifest_path = _WEB_DIR / "manifest.json"
+        if not manifest_path.exists():
+            raise HTTPException(status_code=404, detail="manifest not found")
+        return FileResponse(manifest_path, media_type="application/manifest+json")
+
+    @app.get("/api/health")
+    def health():
+        """公开轻量健康探针（供 App / 小程序局域网与云通道自动切换探测）。"""
+        return {
+            "status": "ok",
+            "service": "ai-home-butler",
+            "version": "2.0",
+            "protocol_version": "1.0",
+            "uptime_seconds": int(time.monotonic() - started_at),
+        }
+
+    def _ha_breaker_status() -> Optional[Dict[str, Any]]:
+        if ha_client is not None and hasattr(ha_client, "circuit_breaker_status"):
+            return ha_client.circuit_breaker_status()
+        return None
+
+    @app.get("/api/system/info")
+    def system_info():
+        """客户端能力发现接口（供 Web / App / 小程序动态适配功能模块）。"""
+        pairings = (
+            memory_store.list_pairings()
+            if hasattr(memory_store, "list_pairings")
+            else []
+        )
+        return {
+            "version": "2.0",
+            "protocol_version": "1.0",
+            "model": config.model,
+            "backend": config.device_backend,
+            "confirmation_mode": config.confirmation_mode,
+            "tts_backend": getattr(config, "tts_backend", "sapi"),
+            "uptime_seconds": int(time.monotonic() - started_at),
+            "ha_circuit_breaker": _ha_breaker_status(),
+            "paired_devices_count": len(pairings),
+            "capabilities": {
+                "direct_control": True,
+                "sse_events": True,
+                "pairing": True,
+                "routines": True,
+                "planner": planner is not None,
+                "voice": voice_stack is not None,
+                "speakers": speaker_identity is not None,
+                "household": household_store is not None,
+            },
+        }
+
+    @app.get("/api/events")
+    async def sse_events(request: Request):
+        """SSE 实时事件流：推送安全流水线步骤、确认请求、设备状态变更与主动提醒。"""
+        q = event_hub.subscribe()
+
+        async def _stream():
+            try:
+                hello = json.dumps(
+                    {"status": "connected", "ts": datetime.now().astimezone().isoformat(timespec="seconds")},
+                    ensure_ascii=False,
+                )
+                yield f"event: connected\ndata: {hello}\n\n"
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        item = await asyncio.to_thread(q.get, True, 15.0)
+                        data_str = json.dumps(item["data"], ensure_ascii=False)
+                        yield f"event: {item['event']}\ndata: {data_str}\n\n"
+                    except queue.Empty:
+                        yield ": heartbeat\n\n"
+            finally:
+                event_hub.unsubscribe(q)
+
+        return StreamingResponse(
+            _stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.get("/api/overview")
     def overview():
         return {
@@ -220,7 +516,232 @@ def create_app(
             # 旧配置桩可能没有该字段：语音后端仅作展示用，缺省按 sapi 呈现
             "tts_backend": getattr(config, "tts_backend", "sapi"),
             "token_budget": token_budget.status() if token_budget is not None else None,
+            "ha_circuit_breaker": _ha_breaker_status(),
         }
+
+    # ---- 设备直控 API（APP_DESIGN.md §4：不经 AI，跳过确认但保留校验/防重放/回读/审计）----
+
+    @app.get("/api/devices")
+    def list_devices():
+        return {"devices": _device_views()}
+
+    @app.get("/api/devices/{device_id}/state")
+    def get_single_device_state(device_id: str):
+        try:
+            device = registry.get(device_id)
+        except DeviceNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        supported = getattr(device, "supported_actions", None)
+        state_val = None
+        available = device.is_available()
+        try:
+            state_val = device.read_state()
+        except DeviceError:
+            available = False
+        return {
+            "id": device.info.id,
+            "name": device.info.name,
+            "type": device.info.device_type,
+            "area": device.info.area,
+            "available": available,
+            "actions": list(supported()) if callable(supported) else [],
+            "state": state_val,
+        }
+
+    @app.post("/api/devices/{device_id}/command")
+    def direct_device_command(
+        device_id: str, payload: DeviceCommandRequest, request: Request
+    ):
+        """Web / App / 小程序设备直控接口：复用安全执行流水线，仅豁免交互确认。"""
+        try:
+            device = registry.get(device_id)
+        except DeviceNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        if not isinstance(device, ControllableDevice):
+            raise HTTPException(status_code=403, detail=f"设备 {device.info.name} 不可控制")
+        supported = device.supported_actions()
+        if payload.action not in supported:
+            raise HTTPException(
+                status_code=400,
+                detail=f"设备 {device.info.name} 不支持动作 {payload.action!r}，支持：{', '.join(supported)}",
+            )
+
+        actor = getattr(request.state, "client_actor", "web_direct")
+        if actor == "user":
+            actor = "web_direct"
+
+        args: Dict[str, Any] = {"device_id": device_id, "action": payload.action}
+        if payload.value is not None:
+            args["value"] = payload.value
+
+        if executor is not None:
+            res = executor.execute_direct("control_device", args, actor=actor)
+            if res.status == "error":
+                raise HTTPException(status_code=400, detail=res.message)
+            event_hub.publish(
+                "device_updated",
+                {
+                    "device_id": device_id,
+                    "action": payload.action,
+                    "status": res.status,
+                    "stage": res.stage,
+                    "state": res.data.get("state_after"),
+                },
+            )
+            return {
+                "device_id": device_id,
+                "action": payload.action,
+                "status": res.status,
+                "stage": res.stage,
+                "message": res.message,
+                "verified": res.data.get("verified", False),
+                "state_after": res.data.get("state_after"),
+            }
+
+        # 兼容未注入 executor 的旧测试桩
+        try:
+            device.apply(payload.action, payload.value)
+            state_after = device.read_state()
+        except StateUnknownError as exc:
+            memory_store.add_audit(
+                "device.direct", f"{device_id} {payload.action}", "unknown", actor=actor
+            )
+            return {
+                "device_id": device_id,
+                "action": payload.action,
+                "status": "unknown",
+                "stage": "unknown",
+                "message": str(exc),
+                "verified": False,
+                "state_after": None,
+            }
+        except DeviceError as exc:
+            memory_store.add_audit(
+                "device.direct", f"{device_id} {payload.action}", "error", actor=actor
+            )
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        memory_store.add_audit(
+            "device.direct", f"{device_id} {payload.action}", "ok", actor=actor
+        )
+        event_hub.publish(
+            "device_updated",
+            {"device_id": device_id, "action": payload.action, "status": "ok", "state": state_after},
+        )
+        return {
+            "device_id": device_id,
+            "action": payload.action,
+            "status": "ok",
+            "stage": "verified",
+            "message": "执行成功",
+            "verified": True,
+            "state_after": state_after,
+        }
+
+    # ---- 客户端配对协议（APP_DESIGN.md §2：为 App / 小程序预留多令牌配对）----
+
+    @app.post("/api/pair/start")
+    def pair_start(request: Request):
+        if not getattr(request.state, "is_primary_token", True):
+            raise HTTPException(status_code=403, detail="仅主管理令牌可发起新设备配对")
+        info = pairing_mgr.start()
+        memory_store.add_audit("pairing.start", "生成 6 位局域网配对码", "ok", actor="user")
+        return info
+
+    @app.post("/api/pair/confirm")
+    def pair_confirm(payload: PairConfirmRequest):
+        device_name = (payload.device_name or "").strip()
+        if not device_name:
+            raise HTTPException(status_code=400, detail="device_name 不能为空")
+        ok, err = pairing_mgr.verify_and_consume(payload.code)
+        if not ok:
+            memory_store.add_audit("pairing.confirm", f"配对失败（{device_name}）：{err}", "error", actor="system")
+            raise HTTPException(status_code=400, detail=err)
+        device_id = f"cli_{uuid.uuid4().hex[:10]}"
+        raw_token = f"bh_{secrets.token_urlsafe(32)}"
+        record = memory_store.add_pairing(
+            device_id=device_id,
+            device_name=device_name,
+            raw_token=raw_token,
+            platform=payload.platform or "unknown",
+        )
+        return {
+            "device_id": record["device_id"],
+            "device_name": record["device_name"],
+            "platform": record["platform"],
+            "token": raw_token,
+            "protocol_version": "1.0",
+        }
+
+    @app.get("/api/pair/devices")
+    def pair_list():
+        return {"devices": memory_store.list_pairings()}
+
+    @app.delete("/api/pair/devices/{device_id}")
+    def pair_revoke(device_id: str, request: Request):
+        if not getattr(request.state, "is_primary_token", True):
+            raise HTTPException(status_code=403, detail="仅主管理令牌可踢除已配对设备")
+        if not memory_store.revoke_pairing(device_id):
+            raise HTTPException(status_code=404, detail="已配对设备不存在或已失效")
+        return {"device_id": device_id, "revoked": True}
+
+    # ---- 设置与人设 API（APP_DESIGN.md §5.3 / §5.5）----
+
+    @app.get("/api/settings/persona")
+    def get_persona():
+        current = memory_store.get_setting("persona", "") if hasattr(memory_store, "get_setting") else ""
+        return {"persona": current or "", "presets": _PERSONA_PRESETS}
+
+    @app.put("/api/settings/persona")
+    def update_persona(payload: PersonaUpdateRequest, request: Request):
+        text = (payload.persona or "").strip()
+        if len(text) > 1000:
+            raise HTTPException(status_code=400, detail="人设提示词长度不能超过 1000 字")
+        memory_store.set_setting("persona", text)
+        actor = getattr(request.state, "client_actor", "user")
+        memory_store.add_audit(
+            "settings.persona",
+            f"更新管家个性化人设（{len(text)} 字）" if text else "恢复默认人设",
+            "ok",
+            actor=actor,
+        )
+        return {"persona": text, "saved": True}
+
+    @app.get("/api/settings/models")
+    def get_models_settings():
+        """返回脱敏后的模型配置视图（绝不回传 API Key 明文）。"""
+        profiles = []
+        for name in ("main", "planner"):
+            if hasattr(config, "model_profile"):
+                try:
+                    p = config.model_profile(name)
+                    key_masked = (
+                        f"{p.api_key[:4]}****{p.api_key[-4:]}"
+                        if len(p.api_key) >= 10
+                        else ("****" if p.api_key else "")
+                    )
+                    profiles.append({
+                        "name": p.name,
+                        "base_url": p.base_url,
+                        "model": p.model,
+                        "api_key_masked": key_masked,
+                        "timeout_seconds": p.timeout_seconds,
+                    })
+                except Exception:
+                    pass
+        if not profiles:
+            profiles.append({
+                "name": "main",
+                "base_url": getattr(config, "base_url", ""),
+                "model": getattr(config, "model", ""),
+                "api_key_masked": "****",
+                "timeout_seconds": getattr(config, "llm_timeout_seconds", 60.0),
+            })
+        return {"profiles": profiles}
+
+    @app.get("/api/rules")
+    def list_rules():
+        return {"rules": memory_store.list_rules()}
 
     @app.post("/api/chat")
     def chat(payload: ChatRequest):
@@ -341,11 +862,8 @@ def create_app(
     def wardrobe_view():
         if household_store is None:
             raise HTTPException(status_code=503, detail="家庭生活服务未装配")
-        from datetime import date
-
         from .household import wash_policy
 
-        today = date.today()
         garments = []
         for g in household_store.list_garments():
             policy = wash_policy(g)
@@ -575,7 +1093,11 @@ def create_app(
     def speakers_status():
         identity = _require_speaker_identity()
         body = identity.status()
-        body["service_healthy"] = voice_stack.client.health_check(timeout_seconds=2.0)
+        body["service_healthy"] = (
+            voice_stack.client.health_check(timeout_seconds=2.0)
+            if voice_stack is not None and getattr(voice_stack, "client", None) is not None
+            else False
+        )
         return body
 
     @app.post("/api/speakers")
@@ -586,6 +1108,8 @@ def create_app(
         wav: UploadFile = File(),
     ):
         identity = _require_speaker_identity()
+        if voice_stack is None or getattr(voice_stack, "client", None) is None:
+            raise HTTPException(status_code=503, detail="语音声纹服务未装配")
         try:
             data = await wav.read()
             # 原始录音只在内存中过一遍：提取向量后即丢弃，不做落盘留存
@@ -656,7 +1180,14 @@ def build_web_app(config) -> FastAPI:
     from .token_budget import TokenBudget
     from .voice.assembly import build_speaker_identity, build_tts_stack
 
-    registry = _build_registry(config)
+    ha_client = None
+    if getattr(config, "device_backend", "") == "homeassistant":
+        from .devices.homeassistant import build_ha_registry, get_ha_client
+
+        ha_client = get_ha_client(config)
+        registry = build_ha_registry(config, client=ha_client)
+    else:
+        registry = _build_registry(config)
     memory_store = MemoryStore(config.data_dir / "memory.db")
 
     # 设备自动发现（阶段 14.5/14.6，仅 HA 后端）：周期刷新兜底 + WebSocket 事件
@@ -665,12 +1196,12 @@ def build_web_app(config) -> FastAPI:
     if (
         getattr(config, "device_backend", "") == "homeassistant"
         and getattr(config, "discovery_enabled", True)
+        and ha_client is not None
     ):
         from .devices.discovery import DiscoveryRefresher
-        from .devices.homeassistant import get_ha_client
 
         refresher = DiscoveryRefresher(
-            get_ha_client(config),
+            ha_client,
             registry,
             interval_seconds=getattr(config, "discovery_refresh_seconds", 300),
             memory_store=memory_store,
@@ -736,6 +1267,8 @@ def build_web_app(config) -> FastAPI:
         auth_token=config.web_token or None,
         token_budget=token_budget,
         household_store=household_store,
+        executor=executor,
+        ha_client=ha_client,
     )
 
 

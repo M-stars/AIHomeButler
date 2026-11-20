@@ -104,6 +104,8 @@ class ButlerConfig:
     weather_city: str
     weather_timeout_seconds: float
     weather_cache_seconds: int
+    # CORS 允许源（逗号分隔或 *；为 App / 小程序 / H5 跨源接入预留，默认空=同源）
+    web_cors_origins: str = ""
 
     def model_profile(self, name: str) -> ModelProfile:
         """读取命名模型档案（.env 中 LLM_<NAME>_BASE_URL/MODEL/API_KEY/
@@ -223,7 +225,7 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         )
     cosyvoice_url = os.environ.get("COSYVOICE_URL", "http://127.0.0.1:9880").strip()
     if not cosyvoice_url.lower().startswith(("http://", "https://")):
-        raise ConfigError(f"配置 COSYVOICE_URL 忘认以 http(s):// 开头，当前值：{cosyvoice_url!r}")
+        raise ConfigError(f"配置 COSYVOICE_URL 必须以 http(s):// 开头，当前值：{cosyvoice_url!r}")
 
     return ButlerConfig(
         base_url=base_url,
@@ -286,4 +288,5 @@ def load_config(env_path: Optional[Path] = None) -> ButlerConfig:
         weather_city=os.environ.get("WEATHER_CITY", "").strip(),
         weather_timeout_seconds=_get_float("WEATHER_TIMEOUT_SECONDS", 5.0),
         weather_cache_seconds=_get_int("WEATHER_CACHE_SECONDS", 1800, minimum=0),
+        web_cors_origins=os.environ.get("WEB_CORS_ORIGINS", "").strip(),
     )

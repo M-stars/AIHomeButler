@@ -1,626 +1,323 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AI Home Butler</title>
-<style>
-  :root { --bg:#0f1420; --card:#171e2e; --line:#26304a; --text:#e6ecff; --dim:#8ea0c9; --ok:#4ade80; --bad:#f87171; --warn:#fbbf24; --accent:#6ea8fe; }
-  * { box-sizing:border-box; margin:0; padding:0; }
-  body { background:var(--bg); color:var(--text); font:15px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; padding:18px; }
-  h1 { font-size:20px; margin-bottom:4px; }
-  .sub { color:var(--dim); font-size:13px; margin-bottom:16px; }
-  .grid { display:grid; grid-template-columns: 1.4fr 1fr; gap:16px; max-width:1200px; margin:0 auto; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:16px; }
-  .card h2 { font-size:15px; color:var(--accent); margin-bottom:10px; }
-  #chatlog { height:320px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; }
-  .msg { padding:8px 12px; border-radius:10px; max-width:92%; white-space:pre-wrap; word-break:break-word; }
-  .user { align-self:flex-end; background:#2b4a8f; }
-  .butler { align-self:flex-start; background:#232c44; }
-  .tool { align-self:flex-start; color:var(--dim); font-size:12px; background:#1b2337; }
-  .notif { border-left:3px solid var(--warn); padding:6px 10px; background:#221d10; border-radius:6px; margin-bottom:6px; font-size:13px; }
-  .row { display:flex; gap:8px; }
-  input[type=text] { flex:1; background:#0d1220; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:9px 12px; }
-  button { background:var(--accent); color:#0b1020; border:0; border-radius:8px; padding:9px 14px; cursor:pointer; font-weight:600; }
-  button.ghost { background:#232c44; color:var(--text); }
-  button.danger { background:#7f1d1d; color:#fff; }
-  button:disabled { opacity:.5; cursor:default; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  td, th { padding:6px 8px; border-bottom:1px solid var(--line); text-align:left; }
-  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
-  #confirmbar { display:none; background:#3a2b10; border:1px solid #7a5a1c; border-radius:10px; padding:12px; margin-bottom:14px; max-width:1200px; margin-left:auto; margin-right:auto; }
-  .memitem, .taskitem { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 8px; border-bottom:1px solid var(--line); font-size:13px; }
-  .small { font-size:12px; color:var(--dim); }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1120">
+  <title>AI Home Butler — 边缘多模态智能家居控制台</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-<h1>🏠 AI Home Butler</h1>
-<div class="sub" id="subline">正在连接…</div>
-<div id="confirmbar">
-  <b>⚠️ 操作确认请求</b>
-  <div id="confirmbody"></div>
+<div class="app-shell">
+  <!-- 左侧导航栏（移动端自动转为底部导航） -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-logo">🏠</div>
+      <div>
+        <div class="brand-title">AI Home Butler</div>
+        <div class="brand-sub">边缘多模态安全管家</div>
+      </div>
+    </div>
+
+    <nav class="nav" role="tablist">
+      <button class="nav-btn active" data-tab="dashboard"><span>⚡</span><span>设备直控</span></button>
+      <button class="nav-btn" data-tab="chat">
+        <span>🤖</span><span>管家对话</span>
+        <span class="nav-badge" id="confirmBadge" style="display:none">0</span>
+      </button>
+      <button class="nav-btn" data-tab="routines"><span>⏰</span><span>例行与提醒</span></button>
+      <button class="nav-btn" data-tab="memory"><span>🧠</span><span>记忆与台账</span></button>
+      <button class="nav-btn" data-tab="settings"><span>🛡️</span><span>审计与多端</span></button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="status-row">
+        <span><span class="dot warn" id="sseDot"></span><span id="sseText">实时通道连接中</span></span>
+      </div>
+      <div class="status-row small">
+        <span>设备后端</span>
+        <span class="mono" id="sideBackend">--</span>
+      </div>
+      <div class="status-row small">
+        <span>HA 熔断器</span>
+        <span class="mono" id="sideBreaker">N/A</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 主工作区 -->
+  <div class="main-area">
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="page-title" id="pageTitle">设备总览与直控</div>
+        <span class="pill accent" id="modelPill">模型：--</span>
+        <span class="pill" id="confirmModePill">确认制：--</span>
+        <span class="pill" id="tokenPill">今日 Token：--</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn btn-ghost btn-sm" id="refreshBtn" title="手动刷新数据">🔄 刷新</button>
+        <button class="btn btn-ghost btn-sm" id="themeBtn" title="切换明暗主题">🌓 主题</button>
+        <button class="btn btn-ghost btn-sm" id="tokenResetBtn" title="重新输入访问令牌">🔑 令牌</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- 全局安全确认横幅（任一页面可见） -->
+      <section class="confirm-banner" id="confirmBanner">
+        <div class="card-header" style="margin-bottom:6px">
+          <div class="card-title">⚠️ 待批准的设备控制 / 敏感操作确认</div>
+          <span class="pill warn">程序化安全拦截 · 超时自动拒绝</span>
+        </div>
+        <div id="confirmList"></div>
+      </section>
+
+      <!-- Tab 1: 总览与设备直控 -->
+      <section class="tab-panel active" id="tab-dashboard">
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-label">已纳管设备</div>
+            <div class="kpi-value" id="kpiTotal">0</div>
+            <div class="kpi-sub" id="kpiOnline">在线 0 台</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">可控设备运行中</div>
+            <div class="kpi-value" id="kpiActive">0</div>
+            <div class="kpi-sub">支持按钮直控（不经 AI）</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">已配对 App / 小程序</div>
+            <div class="kpi-value" id="kpiPaired">0</div>
+            <div class="kpi-sub">多令牌隔离鉴权</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">当日 Token 消耗</div>
+            <div class="kpi-value" id="kpiTokens">0</div>
+            <div class="progress-track"><div class="progress-fill" id="kpiTokenBar" style="width:0%"></div></div>
+          </div>
+        </div>
+
+        <div id="deviceAreas">
+          <div class="card small">正在加载家庭设备…</div>
+        </div>
+      </section>
+
+      <!-- Tab 2: AI 管家对话与实时安全流水线 -->
+      <section class="tab-panel" id="tab-chat">
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">💬 AI 智能家居管家对话</div>
+              <label class="small" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="taskModeToggle"> 多步骤规划模式（/task）
+              </label>
+            </div>
+            <div class="chat-box" id="chatLog">
+              <div class="bubble butler">你好！我是你的边缘多模态智能家居管家。你可以直接询问传感器状态、控制家电，或切换多步骤规划模式执行复杂场景。</div>
+            </div>
+            <div class="quick-chips">
+              <button class="chip" data-prompt="现在家里各传感器温度和设备状态如何？">🌡️ 查环境与状态</button>
+              <button class="chip" data-prompt="帮我打开客厅灯">💡 开客厅灯</button>
+              <button class="chip" data-prompt="我准备睡觉了，关掉客厅灯并把卧室风扇调到低档">🌙 睡眠场景</button>
+              <button class="chip" data-prompt="查看当前已保存的长期记忆">🧠 查长期记忆</button>
+            </div>
+            <div class="row">
+              <input type="text" class="grow" id="chatInput" placeholder="输入自然语言指令，例如：现在客厅温度是多少？把客厅灯打开">
+              <button class="btn" id="sendBtn">发送</button>
+            </div>
+            <div class="small" style="margin-top:8px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px">
+              <span>所有设备控制均由独立安全执行器校验并请求确认，不依赖提示词约束。</span>
+              <label style="cursor:pointer"><input type="checkbox" id="speakReplyToggle"> 朗读回复（TTS）</label>
+            </div>
+          </div>
+
+          <!-- 实时 8 步安全流水线可视化 -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">🛡️ 实时安全执行流水线（SSE）</div>
+              <span class="pill" id="pipeCurrentTool">空闲</span>
+            </div>
+            <div class="pipeline-steps" id="pipelineSteps">
+              <div class="pipe-step" data-step="register_check"><span class="pipe-num">1</span><span class="pipe-name">工具白名单检查</span><span class="pipe-detail">待命</span></div>
+              <div class="pipe-step" data-step="json_parse"><span class="pipe-num">2</span><span class="pipe-name">JSON 参数解析</span><span class="pipe-detail">待命</span></div>
+              <div class="pipe-step" data-step="schema_validate"><span class="pipe-num">3</span><span class="pipe-name">Schema 强类型校验</span><span class="pipe-detail">待命</span></div>
+              <div class="pipe-step" data-step="risk_check"><span class="pipe-num">4</span><span class="pipe-name">风险分级拦截</span><span class="pipe-detail">待命</span></div>
+              <div class="pipe-step" data-step="dedup_check"><span class="pipe-num">5</span><span class="pipe-name">3s 防重放保护</span><span class="pipe-detail">待命</span></div>
+              <div class="pipe-step" data-step="user_confirm"><span class="pipe-num">6</span><span class="pipe-name">用户显式确认</span><span class="pipe-detail">待命</span></div>
+              <div class="pipe-step" data-step="execute"><span class="pipe-num">7</span><span class="pipe-name">带超时设备执行</span><span class="pipe-detail">待命</span></div>
+              <div class="pipe-step" data-step="verify_audit"><span class="pipe-num">8</span><span class="pipe-name">状态回读与审计落库</span><span class="pipe-detail">待命</span></div>
+            </div>
+            <div class="small" style="margin-top:12px">
+              高风险域（门锁 / 燃气 / 警报 / 热水器）在注册表与架构层结构性排除，杜绝越权执行。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 3: 例行任务与主动提醒 -->
+      <section class="tab-panel" id="tab-routines">
+        <div class="grid-equal">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">⏰ 预授权例行任务</div>
+              <span class="pill accent">定时执行 · 全量审计</span>
+            </div>
+            <div id="routineList" class="small">加载中…</div>
+            <hr style="border:0;border-top:1px solid var(--border);margin:14px 0">
+            <div class="card-title" style="font-size:14px;margin-bottom:10px">➕ 新建例行任务</div>
+            <div class="row" style="margin-bottom:8px">
+              <input type="text" class="grow" id="rtName" placeholder="任务名称，如：工作日早安开灯">
+              <input type="time" id="rtTime" value="07:30">
+            </div>
+            <div class="row" style="margin-bottom:8px">
+              <select id="rtDays">
+                <option value="daily">每天</option>
+                <option value="weekdays">工作日（周一至周五）</option>
+                <option value="weekends">周末（周六日）</option>
+              </select>
+              <select class="grow" id="rtDevice"></select>
+              <select id="rtAction">
+                <option value="turn_on">打开 (turn_on)</option>
+                <option value="turn_off">关闭 (turn_off)</option>
+              </select>
+              <button class="btn btn-sm" id="rtCreateBtn">创建</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">🔔 主动提醒与规则</div>
+              <span class="pill">确定性规则引擎</span>
+            </div>
+            <div id="notifList" class="small">加载中…</div>
+            <hr style="border:0;border-top:1px solid var(--border);margin:14px 0">
+            <div class="card-title" style="font-size:14px;margin-bottom:8px">📋 已配置主动监测规则</div>
+            <div id="ruleList" class="small">加载中…</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">🧭 多步骤任务执行记录</div>
+          </div>
+          <div id="taskLogList" class="small">加载中…</div>
+        </div>
+      </section>
+
+      <!-- Tab 4: 长期记忆与家庭台账 -->
+      <section class="tab-panel" id="tab-memory">
+        <div class="grid-equal">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">🧠 长期记忆管理</div>
+              <span class="pill">按声纹成员隔离</span>
+            </div>
+            <div class="row" style="margin-bottom:12px">
+              <select id="memKind">
+                <option value="preference">偏好</option>
+                <option value="fact">事实</option>
+              </select>
+              <input type="text" class="grow" id="memContent" placeholder="新增家庭共享记忆，如：晚上十点后客厅灯亮度调到 30%">
+              <button class="btn btn-sm" id="memAddBtn">保存</button>
+            </div>
+            <div id="memList" class="small">加载中…</div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">🥗 食材与衣柜台账（阶段 14.7）</div>
+            </div>
+            <div class="small" style="margin-bottom:8px;font-weight:600;color:var(--text)">库存食材</div>
+            <div id="pantryList" class="small" style="margin-bottom:14px">加载中…</div>
+            <div class="small" style="margin-bottom:8px;font-weight:600;color:var(--text)">衣柜衣物</div>
+            <div id="wardrobeList" class="small">加载中…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 5: 安全审计、多端配对与语音设置 -->
+      <section class="tab-panel" id="tab-settings">
+        <div class="grid-equal">
+          <!-- App / 小程序配对管理 -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">📱 App / 小程序多端配对中心</div>
+              <span class="pill accent">协议 v1.0 已就绪</span>
+            </div>
+            <div class="small" style="margin-bottom:10px">
+              为后续 Android/iOS App 与微信小程序预留标准化配对与多令牌鉴权接口（6 位一次性配对码，10 分钟有效，最多 3 次尝试）。
+            </div>
+            <div class="row">
+              <button class="btn" id="pairStartBtn">🔗 生成 6 位配对码</button>
+              <span class="small mono">POST /api/pair/confirm · Bearer 令牌</span>
+            </div>
+            <div class="pair-code-box" id="pairCodeBox">
+              <div class="small">请在 App 或小程序中输入以下局域网配对码：</div>
+              <div class="pair-code-digits" id="pairCodeDigits">------</div>
+              <div class="small" id="pairCodeExpiry">有效倒计时 --</div>
+            </div>
+            <div style="margin-top:14px">
+              <div class="small" style="font-weight:600;color:var(--text);margin-bottom:8px">已配对客户端列表</div>
+              <div id="pairedList" class="small">暂无已配对客户端</div>
+            </div>
+          </div>
+
+          <!-- AI 个性化人设与模型配置 -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">🎭 管家 AI 人设与模型档案</div>
+              <span class="pill ok">热生效</span>
+            </div>
+            <div class="quick-chips" id="personaPresets"></div>
+            <textarea id="personaInput" placeholder="自定义管家表达风格（留空恢复默认；仅影响语气风格，绝不覆盖安全规则）"></textarea>
+            <div class="row" style="margin-top:10px;justify-content:space-between">
+              <span class="small">模型档案（API Key 脱敏只读）：</span>
+              <button class="btn btn-sm" id="personaSaveBtn">💾 保存人设</button>
+            </div>
+            <div id="modelProfiles" class="small" style="margin-top:10px"></div>
+          </div>
+        </div>
+
+        <!-- 语音与声纹 -->
+        <div class="grid-equal">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">🎙️ 语音合成与音色库</div>
+              <button class="btn btn-ghost btn-sm" id="voiceCacheClearBtn">清空缓存</button>
+            </div>
+            <div id="voiceStatus" class="small" style="margin-bottom:8px">检测中…</div>
+            <div id="voiceList" class="small"></div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">🗣️ 家庭成员声纹识别</div>
+            </div>
+            <div id="speakerStatus" class="small" style="margin-bottom:8px">检测中…</div>
+            <div id="speakerList" class="small"></div>
+          </div>
+        </div>
+
+        <!-- 安全审计日志 -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">📜 安全审计日志（最近 100 条）</div>
+            <span class="pill">区分 agent / web_direct / device_app</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>时间</th><th>主体 (Actor)</th><th>动作</th><th>状态</th><th>详情</th></tr>
+              </thead>
+              <tbody id="auditBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
 </div>
 
-<div class="grid">
-  <div>
-    <div class="card">
-      <h2>对话</h2>
-      <div id="chatlog"></div>
-      <div class="row">
-        <input type="text" id="chatinput" placeholder="和管家说话，例如：现在客厅温度是多少？把客厅灯打开" />
-        <button id="sendbtn">发送</button>
-      </div>
-      <div class="small" style="margin-top:6px">多步骤任务输入 <code>/task 任务描述</code>；控制设备会在这里弹出确认请求。</div>
-    </div>
-    <div class="card">
-      <h2>主动提醒</h2>
-      <div id="notiflist" class="small">加载中…</div>
-    </div>
-    <div class="card">
-      <h2>语音设置（音色库）</h2>
-      <div id="voicestatus" class="small">加载中…</div>
-      <div class="small" style="margin:6px 0">
-        <label><input type="checkbox" id="speakreply"> 朗读管家回复（使用当前默认音色，AI 合成语音）</label>
-      </div>
-      <div id="voicelist" style="margin:8px 0"></div>
-      <div class="row" style="margin-bottom:6px">
-        <input type="text" id="voicetesttext" placeholder="试听文本（默认：你好，卧室现在的温度是二十五度。）" />
-      </div>
-      <div class="row" style="margin-bottom:6px">
-        <button id="voicepreset" class="ghost">添加官方示例音色</button>
-        <button id="voicecacheclear" class="ghost">清空生成缓存</button>
-      </div>
-      <div class="small" style="margin-bottom:4px"><b>新建音色</b>（克隆需要说话人明确授权；仅支持 wav/mp3/flac/ogg/m4a，≤10MB，建议 5~15 秒）</div>
-      <div class="row" style="margin-bottom:6px">
-        <input type="text" id="voicename" placeholder="音色名称，如：我的声音" />
-      </div>
-      <div class="row" style="margin-bottom:6px">
-        <input type="text" id="voicereftext" placeholder="参考录音中实际说出的文字" />
-      </div>
-      <div class="row" style="margin-bottom:6px">
-        <input type="file" id="voicefile" accept=".wav,.mp3,.flac,.ogg,.m4a" style="flex:1;color:var(--dim)" />
-      </div>
-      <div class="row">
-        <label class="small" style="display:flex;align-items:center;gap:4px">
-          <input type="checkbox" id="voiceconsent"> 我是该录音的说话人 / 已获得说话人明确授权
-        </label>
-        <button id="voiceadd">创建音色</button>
-      </div>
-      <div class="small warn" style="margin-top:6px">⚠ 所有合成语音均为 AI 生成，请勿用于冒充真人或欺骗他人。</div>
-      <div id="voicemsg" class="small"></div>
-    </div>
-    <div class="card">
-      <h2>家庭成员声纹</h2>
-      <div id="speakerstatus" class="small">加载中…</div>
-      <div id="speakerlist" style="margin:8px 0"></div>
-      <div class="small" style="margin-bottom:4px"><b>注册成员</b>（用 5~15 秒该成员的清晰朗读录音；录音仅用于提取声纹向量，提取后即丢弃，向量只存本机）</div>
-      <div class="row" style="margin-bottom:6px">
-        <input type="text" id="speakername" placeholder="成员称呼，如：爸爸 / 妈妈 / 小明" />
-      </div>
-      <div class="row" style="margin-bottom:6px">
-        <select id="spkvoice" style="flex:1;background:#0d1220;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:9px 12px">
-          <option value="">回答音色：默认（可在创建后修改）</option>
-        </select>
-      </div>
-      <div class="row" style="margin-bottom:6px">
-        <input type="file" id="speakerfile" accept=".wav,.mp3,.flac,.ogg,.m4a" style="flex:1;color:var(--dim)" />
-      </div>
-      <div class="row">
-        <label class="small" style="display:flex;align-items:center;gap:4px;flex:1">
-          <input type="checkbox" id="speakerconsent"> 该成员本人/监护人已同意采集声纹
-        </label>
-        <button id="speakeradd">注册成员</button>
-      </div>
-      <div class="small" style="margin-top:6px">识别只用于个性化（称呼/记忆/音色），<b>不作为身份验证</b>；设备操作确认流程不受影响。</div>
-      <div id="speakermsg" class="small"></div>
-    </div>
-  </div>
-  <div>
-    <div class="card">
-      <h2>设备</h2>
-      <table id="devicetable"><thead><tr><th>设备</th><th>状态</th></tr></thead><tbody></tbody></table>
-    </div>
-    <div class="card">
-      <h2>长期记忆</h2>
-      <div class="row" style="margin-bottom:8px">
-        <input type="text" id="meminput" placeholder="手动添加一条记忆（视为用户陈述）" />
-        <button id="memadd" class="ghost">添加</button>
-      </div>
-      <div id="memlist"></div>
-    </div>
-    <div class="card">
-      <h2>任务记录</h2>
-      <div id="tasklist" class="small">加载中…</div>
-    </div>
-    <div class="card">
-      <h2>审计日志</h2>
-      <div id="auditlist" class="small">加载中…</div>
-    </div>
-  </div>
-</div>
-
-<script>
-const $ = (id) => document.getElementById(id);
-let busy = false;
-
-// ---- 访问令牌（评审 4.3）：启动 URL 带 ?token= 时自动保存；之后走 localStorage ----
-let TOKEN = localStorage.getItem("butler_token") || "";
-const urlToken = new URLSearchParams(location.search).get("token");
-if (urlToken) {
-  TOKEN = urlToken;
-  localStorage.setItem("butler_token", TOKEN);
-  history.replaceState(null, "", location.pathname); // 从地址栏抹掉令牌
-}
-
-function withAuth(options) {
-  options = options || {};
-  const headers = Object.assign({}, options.headers || {}, { "X-Butler-Token": TOKEN });
-  return Object.assign({}, options, { headers });
-}
-
-let askingToken = false;
-function askToken() {
-  if (askingToken) return; // 多个轮询同时 401 时只弹一次
-  askingToken = true;
-  const t = prompt("请输入访问令牌（启动服务时控制台已打印；也可在 .env 设 WEB_TOKEN 后重启）");
-  if (t && t.trim()) {
-    localStorage.setItem("butler_token", t.trim());
-    location.reload();
-  } else {
-    askingToken = false;
-  }
-}
-
-// 安全的 DOM 构建辅助：所有服务端数据只经 textContent 进页面（评审 4.3 XSS）
-function el(tag, cls, text) {
-  const node = document.createElement(tag);
-  if (cls) node.className = cls;
-  if (text !== undefined && text !== null) node.textContent = text;
-  return node;
-}
-
-function addMsg(cls, text) {
-  const div = el("div", "msg " + cls, text);
-  $("chatlog").appendChild(div);
-  $("chatlog").scrollTop = $("chatlog").scrollHeight;
-}
-
-async function jfetch(url, options) {
-  const resp = await fetch(url, withAuth(options));
-  if (resp.status === 401) { askToken(); throw new Error("需要访问令牌"); }
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(data.detail || resp.statusText);
-  return data;
-}
-
-async function send() {
-  if (busy) return;
-  const input = $("chatinput");
-  const text = input.value.trim();
-  if (!text) return;
-  busy = true; $("sendbtn").disabled = true;
-  addMsg("user", text);
-  input.value = "";
-  const isTask = text.toLowerCase().startsWith("/task ");
-  try {
-    const data = await jfetch(isTask ? "/api/task" : "/api/chat", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({text: isTask ? text.slice(6) : text}),
-    });
-    if (isTask) {
-      addMsg("tool", `任务结果：${data.status}`);
-      (data.steps || []).forEach(s => addMsg("tool", `${s.index}. ${s.tool} → ${s.status}：${s.message || ""}`));
-      addMsg("butler", data.summary || "");
-    } else {
-      (data.tool_events || []).forEach(e => addMsg("tool", `[工具] ${e.tool}: ${e.status} — ${e.message}`));
-      (data.notifications || []).forEach(n => addMsg("tool", `[主动提醒] ${n.message}`));
-      addMsg("butler", data.reply || "（无回复）");
-      if ($("speakreply").checked && data.reply) {
-        jfetchAudio("/api/tts", {
-          method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({text: data.reply}),
-        }).then(playBlob).catch(err => addMsg("tool", "朗读失败：" + err.message));
-      }
-    }
-  } catch (err) {
-    addMsg("tool", "请求失败：" + err.message);
-  } finally {
-    busy = false; $("sendbtn").disabled = false;
-    refresh();
-  }
-}
-
-async function pollConfirmations() {
-  try {
-    const data = await jfetch("/api/confirmations");
-    const list = data.confirmations || [];
-    if (!list.length) { $("confirmbar").style.display = "none"; return; }
-    $("confirmbar").style.display = "block";
-    $("confirmbody").innerHTML = "";
-    list.forEach(c => {
-      const row = document.createElement("div");
-      row.style.marginTop = "8px";
-      const info = document.createElement("div");
-      info.textContent = c.summary + "  " + JSON.stringify(c.arguments || {});
-      const yes = document.createElement("button");
-      yes.textContent = "批准"; yes.onclick = () => respond(c.id, true);
-      const no = document.createElement("button");
-      no.textContent = "拒绝"; no.className = "danger"; no.onclick = () => respond(c.id, false);
-      row.append(info, yes, no);
-      $("confirmbody").appendChild(row);
-    });
-  } catch (e) { /* 忽略轮询错误 */ }
-}
-
-async function respond(id, approved) {
-  await jfetch("/api/confirmations/" + id, {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({approved}),
-  });
-  pollConfirmations();
-}
-
-async function refreshDevices() {
-  try {
-    const data = await jfetch("/api/overview");
-    let sub = `模型 ${data.model} ｜ 设备后端 ${data.backend} ｜ 确认模式 ${data.confirmation_mode}`;
-    if (data.token_budget && data.token_budget.enabled) {
-      sub += ` ｜ 今日 token ${data.token_budget.used_today}/${data.token_budget.limit}`;
-    }
-    $("subline").textContent = sub;
-    const tbody = $("devicetable").querySelector("tbody");
-    tbody.textContent = "";
-    (data.devices || []).forEach(d => {
-      const tr = document.createElement("tr");
-      const nameCell = el("td", "", d.name);
-      nameCell.appendChild(el("div", "small", d.id));
-      const stateText = d.available
-        ? (d.state ? JSON.stringify(d.state) : "在线")
-        : "离线";
-      const stateCell = el("td", d.available ? "ok" : "bad", stateText);
-      tr.append(nameCell, stateCell);
-      tbody.appendChild(tr);
-    });
-  } catch (e) { /* 忽略 */ }
-}
-
-async function refreshMemories() {
-  try {
-    const data = await jfetch("/api/memories");
-    const box = $("memlist");
-    box.textContent = "";
-    (data.memories || []).forEach(m => {
-      const row = document.createElement("div");
-      row.className = "memitem";
-      const label = m.kind === "preference" ? "偏好" : "事实";
-      const span = document.createElement("span");
-      span.append(el("b", "small", `[${label}]`), document.createTextNode(" " + m.content));
-      const del = document.createElement("button");
-      del.textContent = "删除"; del.className = "danger";
-      del.onclick = async () => { await jfetch("/api/memories/" + m.id, {method: "DELETE"}); refreshMemories(); };
-      row.append(span, del);
-      box.appendChild(row);
-    });
-    if (!(data.memories || []).length) box.textContent = "暂无记忆";
-  } catch (e) { /* 忽略 */ }
-}
-
-async function refreshNotifications() {
-  try {
-    const data = await jfetch("/api/notifications");
-    const box = $("notiflist");
-    box.textContent = "";
-    (data.notifications || []).slice(0, 8).forEach(n => {
-      const div = el("div", "notif", `${n.created_at.slice(5, 16)} ${n.message}`);
-      box.appendChild(div);
-    });
-    if (!(data.notifications || []).length) box.textContent = "暂无主动提醒。在对话里说“温度超过30度提醒我”即可创建规则。";
-  } catch (e) { /* 忽略 */ }
-}
-
-async function refreshTasks() {
-  try {
-    const data = await jfetch("/api/tasks");
-    const box = $("tasklist");
-    box.textContent = "";
-    (data.tasks || []).slice(0, 6).forEach(t => {
-      const div = document.createElement("div");
-      div.className = "taskitem";
-      div.append(
-        el("span", "", String(t.user_text || "").slice(0, 26)),
-        el("span", t.outcome === "completed" ? "ok" : "warn", t.outcome),
-      );
-      box.appendChild(div);
-    });
-    if (!(data.tasks || []).length) box.textContent = "暂无任务记录";
-  } catch (e) { /* 忽略 */ }
-}
-
-async function refreshAudit() {
-  try {
-    const data = await jfetch("/api/audit?limit=30");
-    const box = $("auditlist");
-    box.textContent = "";
-    (data.audit || []).slice(0, 12).forEach(a => {
-      const div = document.createElement("div");
-      div.className = "memitem";
-      div.append(
-        el("span", "", `${a.created_at.slice(5, 16)} [${a.action}] ${a.detail}`.slice(0, 120)),
-        el("span", a.status === "ok" ? "ok" : "warn", a.status || ""),
-      );
-      box.appendChild(div);
-    });
-    if (!(data.audit || []).length) box.textContent = "暂无审计记录（工具调用、记忆修改、确认与音色/声纹变更都会记录在此）";
-  } catch (e) { /* 忽略 */ }
-}
-
-// ---- 语音设置（音色库）----
-
-function voiceMsg(text, isErr) {
-  const box = $("voicemsg");
-  box.textContent = text || "";
-  box.className = "small " + (isErr ? "bad" : "ok");
-}
-
-async function jfetchAudio(url, options) {
-  const resp = await fetch(url, withAuth(options));
-  if (resp.status === 401) { askToken(); throw new Error("需要访问令牌"); }
-  if (!resp.ok) {
-    const data = await resp.json().catch(() => ({}));
-    throw new Error(data.detail || resp.statusText);
-  }
-  return await resp.blob();
-}
-
-function playBlob(blob) {
-  const url = URL.createObjectURL(blob);
-  const audio = new Audio(url);
-  audio.play();
-  audio.onended = () => URL.revokeObjectURL(url);
-}
-
-async function refreshVoiceStatus() {
-  const box = $("voicestatus");
-  try {
-    const s = await jfetch("/api/voice/status");
-    box.textContent = "";
-    const line = document.createElement("div");
-    line.append(el("b", "", `TTS 后端 ${s.backend}`), document.createTextNode(" ｜ "));
-    if (s.backend === "cosyvoice") {
-      line.append(s.cosyvoice_healthy
-        ? el("span", "ok", "CosyVoice 服务在线")
-        : el("span", "bad", "CosyVoice 服务离线"));
-    } else {
-      line.append(document.createTextNode("Windows SAPI 离线合成"));
-    }
-    if (s.default_voice) {
-      line.append(document.createTextNode(" ｜ 默认音色 "), el("b", "", s.default_voice.display_name));
-    }
-    if (s.last_degradation) {
-      line.append(document.createTextNode(" ｜ "), el("span", "warn", `⚠ 已降级到 ${s.last_degradation.to}（${s.last_degradation.reason}）`));
-    }
-    box.append(line, el("div", "small", s.ai_disclaimer || ""));
-  } catch (e) {
-    box.textContent = "";
-    box.append(el("span", "bad", "语音模块不可用：" + e.message));
-  }
-}
-
-async function refreshVoices() {
-  try {
-    const data = await jfetch("/api/voices");
-    const box = $("voicelist");
-    box.textContent = "";
-    (data.voices || []).forEach(v => {
-      const row = document.createElement("div");
-      row.className = "memitem";
-      const active = data.active_voice_id === v.voice_id;
-      const span = document.createElement("span");
-      span.append(el("b", "", v.display_name));
-      if (v.is_default) span.append(el("span", "ok", " [默认]"));
-      span.append(document.createTextNode(" "));
-      span.append(v.consent_status === "granted"
-        ? el("span", "ok", "已授权") : el("span", "warn", "未授权"));
-      span.append(el("div", "small",
-        `${active ? "当前合成使用中 ｜ " : ""}参考文本长度 ${v.reference_text.length} 字`));
-      const btns = document.createElement("div");
-      btns.style.display = "flex"; btns.style.gap = "6px";
-      const mk = (label, cls, fn) => { const b = document.createElement("button"); b.textContent = label; b.className = cls; b.onclick = fn; return b; };
-      btns.append(
-        mk("试听", "ghost", () => testVoice(v)),
-        v.is_default ? document.createElement("span") : mk("设为默认", "ghost", async () => { await jfetch(`/api/voices/${v.voice_id}/default`, {method: "POST"}); refreshVoice(); voiceMsg(`已将「${v.display_name}」设为默认音色`); }),
-        v.consent_status === "granted"
-          ? mk("撤销授权", "ghost", async () => { await jfetch(`/api/voices/${v.voice_id}/consent`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({granted: false})}); refreshVoice(); })
-          : mk("确认授权", "ghost", async () => { await jfetch(`/api/voices/${v.voice_id}/consent`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({granted: true})}); refreshVoice(); }),
-        mk("删除", "danger", async () => {
-          if (!confirm(`删除音色「${v.display_name}」？将同时删除其参考录音与生成缓存，不可恢复。`)) return;
-          await jfetch("/api/voices/" + v.voice_id, {method: "DELETE"});
-          refreshVoice(); voiceMsg(`已删除音色「${v.display_name}」`);
-        })
-      );
-      row.append(span, btns);
-      box.appendChild(row);
-    });
-    if (!(data.voices || []).length) box.textContent = "音色库为空。可添加官方示例音色，或上传参考录音创建个人音色。";
-  } catch (e) { /* 状态区已提示 */ }
-}
-
-async function testVoice(v) {
-  const text = $("voicetesttext").value.trim() || "你好，卧室现在的温度是二十五度。";
-  voiceMsg(`正在用「${v.display_name}」试听…`);
-  try {
-    const blob = await jfetchAudio(`/api/voices/${v.voice_id}/test`, {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({text}),
-    });
-    playBlob(blob);
-    voiceMsg(`试听成功（${v.display_name}，AI 合成语音）`);
-  } catch (e) {
-    voiceMsg("试听失败：" + e.message, true);
-  }
-}
-
-async function createVoice() {
-  const name = $("voicename").value.trim();
-  const refText = $("voicereftext").value.trim();
-  const file = $("voicefile").files[0];
-  if (!name || !refText || !file) { voiceMsg("请填写音色名称、参考录音文本并选择录音文件", true); return; }
-  if (!$("voiceconsent").checked) { voiceMsg("克隆音色需要勾选授权确认（未授权的音色只能保存、不能合成）", true); return; }
-  const form = new FormData();
-  form.append("display_name", name);
-  form.append("reference_text", refText);
-  form.append("consent_granted", "true");
-  form.append("prompt_wav", file);
-  voiceMsg("正在创建音色…");
-  try {
-    const data = await jfetch("/api/voices", {method: "POST", body: form});
-    $("voicename").value = ""; $("voicereftext").value = ""; $("voicefile").value = ""; $("voiceconsent").checked = false;
-    refreshVoice();
-    voiceMsg(`音色「${data.voice.display_name}」已创建，可直接试听`);
-  } catch (e) {
-    voiceMsg("创建失败：" + e.message, true);
-  }
-}
-
-function refreshVoice() { refreshVoiceStatus(); refreshVoices(); }
-
-// ---- 家庭成员声纹 ----
-
-function speakerMsg(text, isErr) {
-  const box = $("speakermsg");
-  box.textContent = text || "";
-  box.className = "small " + (isErr ? "bad" : "ok");
-}
-
-async function refreshSpeakers() {
-  const statusBox = $("speakerstatus");
-  try {
-    const data = await jfetch("/api/speakers");
-    statusBox.textContent = "";
-    const line = document.createElement("div");
-    if (data.speaker_recognition) {
-      line.append(el("span", "ok", "识别已开启"), document.createTextNode(
-        `（阈值 ${data.threshold.toFixed(2)}，${data.member_count} 位成员）`));
-    } else {
-      line.append(el("span", "warn", "识别未开启"), document.createTextNode("（.env 设 SPEAKER_RECOGNITION=1）"));
-    }
-    line.append(document.createTextNode(" ｜ "));
-    line.append(data.service_healthy
-      ? el("span", "ok", "声纹服务在线")
-      : el("span", "bad", "声纹服务离线（需启动 CosyVoice 服务）"));
-    statusBox.append(line, el("div", "small", data.ai_disclaimer || ""));
-
-    // 音色下拉框（绑定成员偏好的回答音色）
-    const voiceSel = $("spkvoice");
-    const voicesData = await jfetch("/api/voices").catch(() => ({voices: []}));
-    const current = voiceSel.value;
-    voiceSel.textContent = "";
-    const defaultOption = document.createElement("option");
-    defaultOption.value = "";
-    defaultOption.textContent = "回答音色：默认（可在创建后修改）";
-    voiceSel.appendChild(defaultOption);
-    (voicesData.voices || []).forEach(v => {
-      const opt = document.createElement("option");
-      opt.value = v.voice_id;
-      opt.textContent = v.display_name;
-      voiceSel.appendChild(opt);
-    });
-    if (current) voiceSel.value = current;
-
-    const box = $("speakerlist");
-    box.textContent = "";
-    (data.members || []).forEach(m => {
-      const row = document.createElement("div");
-      row.className = "memitem";
-      const span = document.createElement("span");
-      span.append(el("b", "", m.display_name));
-      span.append(el("div", "small",
-        `识别 ${m.hits.count} 次${m.hits.last_at ? "｜最近 " + m.hits.last_at.slice(5, 16) : ""}｜音色 ${m.voice_id ? "已绑定" : "默认"}`));
-      const btns = document.createElement("div");
-      btns.style.display = "flex"; btns.style.gap = "6px";
-      const mk = (label, cls, fn) => { const b = document.createElement("button"); b.textContent = label; b.className = cls; b.onclick = fn; return b; };
-      btns.append(
-        mk("换绑音色", "ghost", async () => {
-          const vid = prompt("输入要绑定的音色 ID（留空恢复默认，音色 ID 见下方音色库）：", m.voice_id || "");
-          if (vid === null) return;
-          const form = new FormData();
-          form.append("voice_id", vid);
-          await jfetch(`/api/speakers/${m.member_id}/voice`, {method: "POST", body: form});
-          refreshSpeakers();
-        }),
-        mk("删除", "danger", async () => {
-          if (!confirm(`删除成员「${m.display_name}」的声纹档案？不可恢复。`)) return;
-          await jfetch("/api/speakers/" + m.member_id, {method: "DELETE"});
-          refreshSpeakers();
-          speakerMsg(`已删除成员「${m.display_name}」`);
-        })
-      );
-      row.append(span, btns);
-      box.appendChild(row);
-    });
-    if (!(data.members || []).length) box.textContent = "尚无成员。注册后，语音模式会自动识别谁在说话并个性化回答。";
-  } catch (e) {
-    statusBox.textContent = "";
-    statusBox.append(el("span", "bad", "声纹模块不可用：" + e.message));
-  }
-}
-
-async function createSpeaker() {
-  const name = $("speakername").value.trim();
-  const file = $("speakerfile").files[0];
-  if (!name || !file) { speakerMsg("请填写成员称呼并选择录音文件", true); return; }
-  if (!$("speakerconsent").checked) { speakerMsg("采集声纹必须先勾选成员本人/监护人授权", true); return; }
-  const form = new FormData();
-  form.append("display_name", name);
-  form.append("consent_granted", "true");
-  form.append("voice_id", $("spkvoice").value || "");
-  form.append("wav", file);
-  speakerMsg("正在提取声纹…");
-  try {
-    const data = await jfetch("/api/speakers", {method: "POST", body: form});
-    $("speakername").value = ""; $("speakerfile").value = ""; $("speakerconsent").checked = false;
-    refreshSpeakers();
-    speakerMsg(`成员「${data.speaker.display_name}」注册成功，语音模式对 TA 说话即可识别`);
-  } catch (e) {
-    speakerMsg("注册失败：" + e.message, true);
-  }
-}
-
-$("speakeradd").onclick = createSpeaker;
-
-function refresh() { refreshDevices(); refreshMemories(); refreshNotifications(); refreshTasks(); refreshAudit(); refreshVoiceStatus(); refreshSpeakers(); }
-
-$("sendbtn").onclick = send;
-$("chatinput").addEventListener("keydown", e => { if (e.key === "Enter") send(); });
-$("voiceadd").onclick = createVoice;
-$("voicepreset").onclick = async () => {
-  try {
-    await jfetch("/api/voices/preset", {method: "POST"});
-    refreshVoice();
-    voiceMsg("官方示例音色已加入音色库（可直接试听）");
-  } catch (e) { voiceMsg("添加失败：" + e.message, true); }
-};
-$("voicecacheclear").onclick = async () => {
-  try {
-    const data = await jfetch("/api/voice/cache/clear", {method: "POST"});
-    voiceMsg(`已清空 ${data.cleared} 个生成缓存文件`);
-  } catch (e) { voiceMsg("清空失败：" + e.message, true); }
-};
-$("memadd").onclick = async () => {
-  const content = $("meminput").value.trim();
-  if (!content) return;
-  await jfetch("/api/memories", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({kind: "preference", content})});
-  $("meminput").value = "";
-  refreshMemories();
-};
-
-refresh();
-refreshVoices();
-refreshSpeakers();
-pollConfirmations();
-setInterval(refresh, 8000);
-setInterval(pollConfirmations, 2000);
-</script>
+<div class="toast-stack" id="toastStack"></div>
+<script src="/static/app.js"></script>
 </body>
 </html>
