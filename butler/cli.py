@@ -4,6 +4,7 @@ Windows 终端默认 GBK 编码，启动时对标准流做 UTF-8 重配置（失
 """
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import datetime
 
@@ -213,8 +214,13 @@ def _build_agent(
             # 未识别说话人（文本模式/陌生人）：只注入共享记忆，
             # 任何成员的个人记忆都不进入陌生上下文
             memory_block = memory_store.prompt_block(shared_only=True)
+        persona = (
+            memory_store.get_setting("persona")
+            if hasattr(memory_store, "get_setting")
+            else None
+        )
         return build_system_prompt(
-            _inventory(registry), datetime.now(), memory_block, member=member
+            _inventory(registry), datetime.now(), memory_block, member=member, persona=persona
         )
 
     conversation = Conversation(system_prompt_provider(), config.max_history_messages)
@@ -254,11 +260,12 @@ def main() -> int:
         household_checker=household_checker,
     )
 
-    backend_label = (
-        f"Home Assistant @ {config.ha_url}"
-        if config.device_backend == BACKEND_HOMEASSISTANT
-        else "模拟设备模式"
-    )
+    if config.device_backend == BACKEND_HOMEASSISTANT:
+        backend_label = f"Home Assistant @ {config.ha_url}"
+    elif config.device_backend == BACKEND_GPIO:
+        backend_label = f"树莓派 GPIO 直连（{config.gpio_devices_file.name}）"
+    else:
+        backend_label = "模拟设备模式"
     print("=" * 56)
     print("AI Home Butler 管家已就绪")
     print(f"设备后端: {backend_label}")

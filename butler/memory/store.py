@@ -9,7 +9,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 import sqlite3
 import threading
 from datetime import datetime
@@ -94,6 +96,20 @@ class MemoryStore:
                     last_fired_at TEXT,
                     last_result TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS pairings (
+                    device_id TEXT PRIMARY KEY,
+                    device_name TEXT NOT NULL,
+                    platform TEXT NOT NULL DEFAULT 'unknown',
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT,
+                    revoked INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -500,6 +516,123 @@ class MemoryStore:
                 "SELECT used_tokens FROM token_usage WHERE day = ?", (day,)
             ).fetchone()
         return int(row["used_tokens"]) if row else 0
+
+    # ------------------------------------------------- 客户端配对（App/小程序）
+
+    @staticmethod
+    def _hash_token(raw_token: str) -> str:
+        return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+    def add_pairing(
+        self,
+        device_id: str,
+        device_name: str,
+        raw_token: str,
+        platform: str = "unknown",
+    ) -> Dict[str, Any]:
+        """登记已配对客户端（只落盘令牌 SHA-256 哈希，不存明文令牌）。"""
+        device_id = (device_id or "").strip()
+        device_name = (device_name or "").strip()
+        platform = (platform or "unknown").strip().lower()[:32] or "unknown"
+        if not device_id or not device_name or not raw_token:
+            raise ValueError("device_id / device_name / raw_token 均不能为空")
+        now = _now()
+        token_hash = self._hash_token(raw_token)
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO pairings (device_id, device_name, platform, token_hash, created_at, last_seen_at, revoked)"
+                " VALUES (?, ?, ?, ?, ?, ?, 0)",
+                (device_id, device_name[:80], platform, token_hash, now, now),
+            )
+            self._conn.commit()
+        self.add_audit(
+            "pairing.create",
+            f"配对客户端「{device_name[:80]}」（{device_id}，平台={platform}）",
+            "ok",
+            actor="user",
+        )
+        return {
+            "device_id": device_id,
+            "device_name": device_name[:80],
+            "platform": platform,
+            "created_at": now,
+            "last_seen_at": now,
+            "revoked": False,
+        }
+
+    def list_pairings(self, include_revoked: bool = False) -> List[Dict[str, Any]]:
+        query = (
+            "SELECT device_id, device_name, platform, created_at, last_seen_at, revoked"
+            " FROM pairings"
+        )
+        if not include_revoked:
+            query += " WHERE revoked = 0"
+        query += " ORDER BY created_at DESC"
+        with self._lock:
+            rows = self._conn.execute(query).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["revoked"] = bool(d["revoked"])
+            out.append(d)
+        return out
+
+    def verify_pairing_token(self, raw_token: str) -> Optional[Dict[str, Any]]:
+        """校验客户端设备令牌；有效则更新 last_seen_at 并返回设备元信息。"""
+        if not raw_token:
+            return None
+        token_hash = self._hash_token(raw_token)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT device_id, device_name, platform, token_hash, revoked"
+                " FROM pairings WHERE token_hash = ? AND revoked = 0",
+                (token_hash,),
+            ).fetchone()
+            if row is None or not secrets.compare_digest(row["token_hash"], token_hash):
+                return None
+            self._conn.execute(
+                "UPDATE pairings SET last_seen_at = ? WHERE device_id = ?",
+                (_now(), row["device_id"]),
+            )
+            self._conn.commit()
+        return {
+            "device_id": row["device_id"],
+            "device_name": row["device_name"],
+            "platform": row["platform"],
+        }
+
+    def revoke_pairing(self, device_id: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE pairings SET revoked = 1 WHERE device_id = ? AND revoked = 0",
+                (device_id,),
+            )
+            self._conn.commit()
+            changed = cursor.rowcount > 0
+        if changed:
+            self.add_audit("pairing.revoke", f"踢除已配对客户端 {device_id}", "ok", actor="user")
+        return changed
+
+    # ------------------------------------------------------------ 系统设置 KV
+
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            ).fetchone()
+        return str(row["value"]) if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        key = (key or "").strip()
+        if not key:
+            raise ValueError("setting key 不能为空")
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (key, str(value), _now()),
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:

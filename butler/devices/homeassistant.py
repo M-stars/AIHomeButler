@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -50,8 +52,92 @@ class HassApiError(DeviceError):
     """HA API 返回错误（认证失败、服务端错误等）。"""
 
 
+_DEFAULT_HTTPX_REQUEST = httpx.request
+
+
+class CircuitBreaker:
+    """三态熔断器（CLOSED → OPEN → HALF_OPEN），防止 HA 宕机时逐台设备等超时卡死。
+
+    - CLOSED：正常放行；连续传输层失败达到 failure_threshold 后转 OPEN；
+    - OPEN：快速失败，不发网络请求；经过 recovery_timeout 后转 HALF_OPEN；
+    - HALF_OPEN：放行单个探测请求，成功回 CLOSED，失败重回 OPEN。
+    """
+
+    STATE_CLOSED = "closed"
+    STATE_OPEN = "open"
+    STATE_HALF_OPEN = "half_open"
+
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        recovery_timeout: float = 30.0,
+    ) -> None:
+        self._failure_threshold = max(1, int(failure_threshold))
+        self._recovery_timeout = max(0.1, float(recovery_timeout))
+        self._lock = threading.Lock()
+        self._state = self.STATE_CLOSED
+        self._consecutive_failures = 0
+        self._opened_at: Optional[float] = None
+        self._half_open_probe_in_flight = False
+
+    def allow_request(self) -> bool:
+        with self._lock:
+            if self._state == self.STATE_CLOSED:
+                return True
+            if self._state == self.STATE_OPEN:
+                elapsed = time.monotonic() - (self._opened_at or 0.0)
+                if elapsed >= self._recovery_timeout:
+                    self._state = self.STATE_HALF_OPEN
+                    self._half_open_probe_in_flight = True
+                    return True
+                return False
+            # HALF_OPEN：仅允许一个探测请求并发通过，其余继续快速失败
+            if not self._half_open_probe_in_flight:
+                self._half_open_probe_in_flight = True
+                return True
+            return False
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._state = self.STATE_CLOSED
+            self._consecutive_failures = 0
+            self._opened_at = None
+            self._half_open_probe_in_flight = False
+
+    def record_failure(self) -> str:
+        with self._lock:
+            self._consecutive_failures += 1
+            self._half_open_probe_in_flight = False
+            if (
+                self._state == self.STATE_HALF_OPEN
+                or self._consecutive_failures >= self._failure_threshold
+            ):
+                self._state = self.STATE_OPEN
+                self._opened_at = time.monotonic()
+            return self._state
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            retry_after = 0.0
+            state = self._state
+            if state == self.STATE_OPEN and self._opened_at is not None:
+                rem = self._recovery_timeout - (time.monotonic() - self._opened_at)
+                if rem <= 0:
+                    state = self.STATE_HALF_OPEN
+                    retry_after = 0.0
+                else:
+                    retry_after = round(rem, 1)
+            return {
+                "state": state,
+                "consecutive_failures": self._consecutive_failures,
+                "failure_threshold": self._failure_threshold,
+                "recovery_timeout": self._recovery_timeout,
+                "retry_after_seconds": retry_after,
+            }
+
+
 class HassClient:
-    """极简 HA REST API 客户端：读状态 + 调服务。"""
+    """HA REST API 客户端：连接池复用 + 三态熔断保护 + 错误语义映射。"""
 
     def __init__(
         self,
@@ -59,6 +145,8 @@ class HassClient:
         token: str,
         timeout_seconds: float = 10.0,
         logger: logging.Logger = None,
+        circuit_failure_threshold: int = 3,
+        circuit_recovery_timeout: float = 30.0,
     ) -> None:
         if not base_url:
             raise HassApiError("HA_URL 未配置")
@@ -71,6 +159,23 @@ class HassClient:
         }
         self._timeout = timeout_seconds
         self._log = logger or logging.getLogger("butler.ha")
+        self._breaker = CircuitBreaker(
+            failure_threshold=circuit_failure_threshold,
+            recovery_timeout=circuit_recovery_timeout,
+        )
+        # 复用持久连接池（trust_env=False：HA 在局域网，绝不走环境代理）
+        self._http = httpx.Client(
+            headers=self._headers,
+            timeout=self._timeout,
+            trust_env=False,
+            limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+        )
+
+    def close(self) -> None:
+        self._http.close()
+
+    def circuit_breaker_status(self) -> Dict[str, Any]:
+        return self._breaker.status()
 
     def get_state(self, entity_id: str) -> Dict[str, Any]:
         return self._request("GET", f"/api/states/{entity_id}", ambiguous=False)
@@ -88,18 +193,33 @@ class HassClient:
             "POST", f"/api/services/{domain}/{service}", json=payload, ambiguous=True
         )
 
-    def _request(
-        self, method: str, path: str, json: Optional[dict] = None, ambiguous: bool = False
-    ):
-        url = self._base + path
-        try:
-            # trust_env=False：HA 在局域网，绝不能被 HTTP_PROXY 等环境代理接管——
-            # 代理返回的 5xx 会被误判为 API 错误，而非离线/结果不明
-            response = httpx.request(
+    def _send_request(self, method: str, url: str, json: Optional[dict]):
+        # 测试若 monkeypatch 了 httpx.request，沿用被桩化的入口；生产走持久连接池
+        if httpx.request is not _DEFAULT_HTTPX_REQUEST:
+            return httpx.request(
                 method, url, headers=self._headers, json=json,
                 timeout=self._timeout, trust_env=False,
             )
+        return self._http.request(method, url, json=json)
+
+    def _request(
+        self, method: str, path: str, json: Optional[dict] = None, ambiguous: bool = False
+    ):
+        if not self._breaker.allow_request():
+            st = self._breaker.status()
+            raise DeviceOffline(
+                f"Home Assistant 熔断保护中（连续传输失败 {st['consecutive_failures']} 次，"
+                f"约 {st['retry_after_seconds']}s 后自动探测恢复）"
+            )
+        url = self._base + path
+        try:
+            response = self._send_request(method, url, json)
         except httpx.TransportError as exc:
+            new_state = self._breaker.record_failure()
+            if new_state == CircuitBreaker.STATE_OPEN:
+                self._log.warning(
+                    "HA 连续传输失败，熔断器已开启（%s）：%s", self._base, type(exc).__name__
+                )
             # 覆盖全部传输层错误（拒连/超时/对端中断等）；
             # 控制类请求失败时结果不明：指令可能已到达 HA
             if ambiguous:
@@ -109,6 +229,9 @@ class HassClient:
             raise DeviceOffline(
                 f"无法连接 Home Assistant（{self._base}）：{type(exc).__name__}"
             ) from exc
+
+        # 传输层连通即认为平台可达（HTTP 401/404 等业务错误不触发熔断）
+        self._breaker.record_success()
 
         if response.status_code == 401:
             raise HassApiError("Home Assistant 认证失败（401）：请检查 .env 中的 HA_TOKEN")
