@@ -27,3 +27,7 @@ cosyvoice/
 # IDE
 .vscode/
 .idea/
+
+# Node（移动端 aihome-butler-mobile 自带 .gitignore，根目录兜底）
+node_modules/
+dist/

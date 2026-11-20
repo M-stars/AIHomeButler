@@ -1,0 +1,90 @@
+{
+  "pages": [
+    {
+      "path": "pages/home/index",
+      "style": {
+        "navigationBarTitleText": "AI 家庭管家",
+        "navigationBarBackgroundColor": "#090e1a",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#090e1a",
+        "enablePullDownRefresh": true,
+        "backgroundTextStyle": "light"
+      }
+    },
+    {
+      "path": "pages/chat/index",
+      "style": {
+        "navigationBarTitleText": "管家对话",
+        "navigationBarBackgroundColor": "#090e1a",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#090e1a"
+      }
+    },
+    {
+      "path": "pages/automation/index",
+      "style": {
+        "navigationBarTitleText": "自动化",
+        "navigationBarBackgroundColor": "#090e1a",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#090e1a"
+      }
+    },
+    {
+      "path": "pages/settings/index",
+      "style": {
+        "navigationBarTitleText": "我的",
+        "navigationBarBackgroundColor": "#090e1a",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#090e1a"
+      }
+    },
+    {
+      "path": "pages/pairing/index",
+      "style": {
+        "navigationBarTitleText": "设备配对",
+        "navigationBarBackgroundColor": "#090e1a",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#090e1a"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "white",
+    "navigationBarTitleText": "AI 家庭管家",
+    "navigationBarBackgroundColor": "#090e1a",
+    "backgroundColor": "#090e1a",
+    "rpxCalcMaxDeviceWidth": 960
+  },
+  "tabBar": {
+    "color": "#94a3b8",
+    "selectedColor": "#38bdf8",
+    "backgroundColor": "#0d1323",
+    "borderStyle": "black",
+    "list": [
+      {
+        "pagePath": "pages/home/index",
+        "text": "首页",
+        "iconPath": "static/tab/home.png",
+        "selectedIconPath": "static/tab/home-active.png"
+      },
+      {
+        "pagePath": "pages/chat/index",
+        "text": "管家",
+        "iconPath": "static/tab/chat.png",
+        "selectedIconPath": "static/tab/chat-active.png"
+      },
+      {
+        "pagePath": "pages/automation/index",
+        "text": "自动化",
+        "iconPath": "static/tab/automation.png",
+        "selectedIconPath": "static/tab/automation-active.png"
+      },
+      {
+        "pagePath": "pages/settings/index",
+        "text": "我的",
+        "iconPath": "static/tab/settings.png",
+        "selectedIconPath": "static/tab/settings-active.png"
+      }
+    ]
+  }
+}

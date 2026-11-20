@@ -202,3 +202,25 @@ def test_audit_endpoint_lists_actions(web):
     client = TestClient(web["app"], headers=_AUTH)
     actions = [a["action"] for a in client.get("/api/audit").json()["audit"]]
     assert "memory.add" in actions
+
+
+def test_unauthorized_response_carries_cors_headers(web):
+    """跨源 401 必须带 CORS 头：401 从最外层鉴权中间件直接返回、不经过
+    CORSMiddleware；若缺 CORS 头，浏览器会把它吞成网络错误，H5 端 App
+    无法触发"凭证已失效 → 重新配对"收敛（移动端验收清单第 2 项）。"""
+    cross = {"Origin": "http://localhost:5173"}
+    anonymous = TestClient(web["app"])
+    resp = anonymous.get("/api/overview", headers=cross)
+    assert resp.status_code == 401
+    assert resp.headers.get("access-control-allow-origin") == "*"
+    allow_headers = resp.headers.get("access-control-allow-headers", "").lower()
+    assert "authorization" in allow_headers
+    # 被踢除/错误的设备令牌走同一条 401 路径，同样要带 CORS 头
+    wrong = TestClient(web["app"], headers={"X-Butler-Token": "wrong", **cross})
+    resp_wrong = wrong.get("/api/overview")
+    assert resp_wrong.status_code == 401
+    assert resp_wrong.headers.get("access-control-allow-origin") == "*"
+    # 无 Origin（同源/原生端）不添加 CORS 头，行为不变
+    plain = anonymous.get("/api/overview")
+    assert plain.status_code == 401
+    assert "access-control-allow-origin" not in plain.headers

@@ -342,6 +342,19 @@ def create_app(
 
     _PUBLIC_PATHS = {"/", "/manifest.json", "/api/health", "/api/pair/confirm"}
 
+    def _cors_headers_for(request: Request, allowed: List[str]) -> Dict[str, str]:
+        """为中间件直接返回的响应补 CORS 头（仅显式带 Origin 的跨源请求）。"""
+        origin = request.headers.get("origin")
+        if not origin:
+            return {}
+        if "*" not in allowed and origin not in allowed:
+            return {}
+        return {
+            "Access-Control-Allow-Origin": "*" if "*" in allowed else origin,
+            "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Butler-Token",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        }
+
     # ---- 多令牌访问鉴权（主令牌 + 已配对 App/小程序设备令牌）----
     @app.middleware("http")
     async def _require_token(request: Request, call_next):
@@ -378,10 +391,15 @@ def create_app(
             request.state.paired_device = paired
             return await call_next(request)
 
+        # 401 从最外层中间件直接返回，不经过 CORSMiddleware；跨源浏览器
+        # （H5 端 App / 第三方 Web 客户端）必须能读到 401 才能触发
+        # "凭证已失效 → 清凭证 → 重新配对"收敛（APP_DESIGN.md §2.3），
+        # 因此这里按已配置的 CORS 策略手动补齐响应头。
         return Response(
             content='{"detail":"未授权：缺少或错误的访问令牌"}',
             status_code=401,
             media_type="application/json",
+            headers=_cors_headers_for(request, cors_origins),
         )
 
     static_dir = _WEB_DIR / "static"
