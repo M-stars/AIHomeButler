@@ -16,7 +16,10 @@ from butler.household.store import HouseholdStore
 from butler.tools.executor import ToolExecutor
 from butler.tools.registry import ToolRegistry
 
-TODAY = date(2026, 11, 1)
+# 纯函数测试用的固定日期（其输入日期相对它硬编码，换日期需同步改输入）
+FIXED_TODAY = date(2026, 11, 1)
+# 工具级测试与生产 date.today() 同源：入库时间戳由生产代码用真实日期打
+TODAY = date.today()
 
 
 @pytest.fixture
@@ -34,11 +37,11 @@ def make_item(store, name="西红柿", days=7, added=None, quantity="3个"):
 # ------------------------------------------------------------- 纯函数
 
 def test_days_left_bands():
-    assert days_left({"added_date": "2026-11-01", "expires_in_days": 7}, TODAY) == 7
-    assert days_left({"added_date": "2026-10-30", "expires_in_days": 2}, TODAY) == 0
-    assert days_left({"added_date": "2026-10-29", "expires_in_days": 2}, TODAY) == -1
-    assert days_left({"added_date": "2026-11-01", "expires_in_days": None}, TODAY) is None
-    assert days_left({"added_date": "bad-date", "expires_in_days": 3}, TODAY) is None
+    assert days_left({"added_date": "2026-11-01", "expires_in_days": 7}, FIXED_TODAY) == 7
+    assert days_left({"added_date": "2026-10-30", "expires_in_days": 2}, FIXED_TODAY) == 0
+    assert days_left({"added_date": "2026-10-29", "expires_in_days": 2}, FIXED_TODAY) == -1
+    assert days_left({"added_date": "2026-11-01", "expires_in_days": None}, FIXED_TODAY) is None
+    assert days_left({"added_date": "bad-date", "expires_in_days": 3}, FIXED_TODAY) is None
 
 
 def test_default_expiry_days_by_category():
@@ -50,27 +53,27 @@ def test_default_expiry_days_by_category():
 def test_evaluate_expiry_levels():
     expired = {"id": 1, "name": "草莓", "quantity": "", "added_date": "2026-10-25",
                "expires_in_days": 5}
-    signal = evaluate_expiry(expired, TODAY)
+    signal = evaluate_expiry(expired, FIXED_TODAY)
     assert signal["level"] == "warning"
     assert "已过保质期 2 天" in signal["message"]
 
     soon = {"id": 2, "name": "牛奶", "quantity": "1盒", "added_date": "2026-10-30",
             "expires_in_days": 4}
-    signal = evaluate_expiry(soon, TODAY)
+    signal = evaluate_expiry(soon, FIXED_TODAY)
     assert signal["level"] == "info"
     assert "还剩 2 天" in signal["message"] and "（1盒）" in signal["message"]
 
     today_due = {"id": 3, "name": "豆腐", "quantity": "", "added_date": "2026-10-31",
                  "expires_in_days": 1}
-    assert "今天到期" in evaluate_expiry(today_due, TODAY)["message"]
+    assert "今天到期" in evaluate_expiry(today_due, FIXED_TODAY)["message"]
 
     fine = {"id": 4, "name": "大米", "quantity": "", "added_date": "2026-11-01",
             "expires_in_days": 180}
-    assert evaluate_expiry(fine, TODAY, warn_days=2) is None
+    assert evaluate_expiry(fine, FIXED_TODAY, warn_days=2) is None
 
     untracked = {"id": 5, "name": "酱油", "quantity": "", "added_date": "2026-11-01",
                  "expires_in_days": None}
-    assert evaluate_expiry(untracked, TODAY) is None
+    assert evaluate_expiry(untracked, FIXED_TODAY) is None
 
 
 # --------------------------------------------------------------- 工具
@@ -165,10 +168,11 @@ def test_list_food_filters(pantry):
     data = _call(executor, registry, "list_food_items", {"filter": "expiring"})
     assert data["count"] == 0
 
-    fresh_soon = make_item(store, name="牛奶", days=3, added="2026-10-30")
+    fresh_soon = make_item(store, name="牛奶", days=3,
+                           added=(date.today() - timedelta(days=2)).isoformat())
     data = _call(executor, registry, "list_food_items", {"filter": "expiring"})
     assert [i["name"] for i in data["items"]] == ["牛奶"]
-    assert data["items"][0]["days_left"] == 1  # 10-30 入库保质期 3 天 → 11-02 到期
+    assert data["items"][0]["days_left"] == 1  # 前天入库保质期 3 天 → 明天到期
 
 
 def test_remove_food_item(pantry):

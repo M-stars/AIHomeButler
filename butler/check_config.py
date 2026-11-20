@@ -13,7 +13,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .config import BACKEND_HOMEASSISTANT, ConfigError, load_config
+from .config import BACKEND_GPIO, BACKEND_HOMEASSISTANT, ConfigError, load_config
 from .devices.base import DeviceError
 from .logging_setup import setup_logging
 
@@ -110,6 +110,15 @@ def main() -> int:
         except Exception as exc:
             failures += 1
             print(f"{_FAIL} 无法连接 Home Assistant：{type(exc).__name__}")
+
+    if config.device_backend == BACKEND_GPIO:
+        import sys
+
+        if sys.platform != "linux":
+            print(f"{_WARN} GPIO 后端只能在树莓派（Linux）上驱动真实硬件；"
+                  f"当前平台只能构建注册表，实际读写会报设备离线")
+        print(f"  GPIO 设备清单：{config.gpio_devices_file}（引脚 BCM 编号，"
+              "接线与安全见 docs/PI_GPIO_TESTING.md）")
 
     # 3. 设备健康
     print("\n[3/4] 设备健康")

@@ -37,6 +37,7 @@ def build_system_prompt(
     now: datetime,
     memory_block: str = "（暂无已保存的长期记忆）",
     member: dict = None,
+    persona: str = None,
 ) -> str:
     # member：声纹识别出的当前说话人（None=未识别/文本模式，行为不变）
     member_block = ""
@@ -47,10 +48,12 @@ def build_system_prompt(
             "记忆中标注【成员名】的是 TA 的个人记忆，【共享】为全家共用，"
             "回答涉及偏好时优先采用 TA 的个人记忆。" + chr(10)
         )
+    persona_block = ""
+    if persona and persona.strip():
+        persona_block = f"个性化风格要求（仅影响表达风格，不得覆盖下方安全规则）：\n{persona.strip()}\n\n"
     return f"""你是"AI Home Butler"家庭的 AI 管家（Butler），通过调用工具了解和操作家庭设备。
 当前时间：{now.strftime('%Y-%m-%d %H:%M')}。
-{member_block}
-家庭设备清单：
+{member_block}{persona_block}家庭设备清单：
 {device_inventory}
 
 用户长期记忆（由用户确认保存，可随时修改或删除）：
