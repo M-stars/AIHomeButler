@@ -1,10 +1,12 @@
-"""语音后端装配（阶段 12）：按 TTS_BACKEND 配置把 SAPI / CosyVoice 组装成 Speaker。
+"""语音后端装配（阶段 12）：按 TTS_BACKEND 配置把本地 TTS / CosyVoice 组装成 Speaker。
 
 主项目其他入口（voice CLI / Web）都通过 build_tts_stack 拿到同一套装配，
 避免各入口自行拼装造成行为不一致：
 
   TTS_BACKEND=sapi       → SapiSpeaker（默认，历史行为完全不变）
-  TTS_BACKEND=cosyvoice  → FallbackSpeaker(CosyVoiceSpeaker, SAPI)
+                           Windows=SAPI5；Linux（树莓派）=espeak，类名不变
+  TTS_BACKEND=espeak     → 同 sapi（Linux 侧的显式写法）
+  TTS_BACKEND=cosyvoice  → FallbackSpeaker(CosyVoiceSpeaker, 本地 TTS)
                            （COSYVOICE_FALLBACK_SAPI=0 时失败直接报错不降级）
 
 装配本身不会连接 CosyVoice 服务（HTTP 客户端惰性连接），因此后端选了
@@ -85,10 +87,12 @@ def build_tts_stack(config: ButlerConfig) -> TTSStack:
     sapi: Optional[Speaker] = None
     try:
         sapi = SapiSpeaker()
-    except Exception as exc:  # 无声卡/SAPI 异常等，播报层面自动降级为静音
+    except Exception as exc:  # 无声卡/SAPI/espeak 异常等，播报层面自动降级为静音
         import logging
 
-        logging.getLogger("butler.voice").warning("SAPI 不可用：%s", exc)
+        logging.getLogger("butler.voice").warning(
+            "本地 TTS 不可用（Windows 需要 SAPI；树莓派需 sudo apt install espeak-ng）：%s", exc
+        )
 
     if config.tts_backend == "cosyvoice":
         if config.cosyvoice_fallback_sapi:
@@ -96,7 +100,7 @@ def build_tts_stack(config: ButlerConfig) -> TTSStack:
             speaker: Speaker = FallbackSpeaker(cosyvoice_speaker, fallback)
         else:
             speaker = cosyvoice_speaker  # 显式禁用降级：失败直接报错
-    else:
+    else:  # sapi / espeak：本地 TTS（espeak 为 sapi 在 Linux 上的别名）
         speaker = sapi if sapi is not None else SilentSpeaker()
     if config.tts_backend != "cosyvoice" or not config.cosyvoice_fallback_sapi:
         fallback = None

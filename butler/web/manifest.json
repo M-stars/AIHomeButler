@@ -1,0 +1,11 @@
+{
+  "name": "AI Home Butler 智能家居管家",
+  "short_name": "HomeButler",
+  "description": "基于树莓派与大语言模型的边缘多模态智能家居安全控制系统",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1120",
+  "theme_color": "#38bdf8",
+  "lang": "zh-CN",
+  "icons": []
+}

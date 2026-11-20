@@ -3,11 +3,12 @@
 策略（与需求 4.6 一致）：
   - 语音识别/合成的长期方案是复用 Home Assistant Voice / Wyoming 生态（见
     docs/VOICE.md），本项目不自行实现识别或合成引擎；
-  - 本模块提供 Windows 下的桥接实现：
-      * TTS：pyttsx3 → Windows SAPI5（离线可用，真实实现）；
+  - 本模块提供跨平台的桥接实现（Windows / Linux 树莓派均可运行）：
+      * TTS：pyttsx3 → Windows SAPI5 / Linux espeak（离线可用，真实实现）；
         CosyVoice → 官方独立服务端（可选后端，见 cosyvoice_client.py）；
       * ASR：接口 + 可选 faster-whisper（本机安装后自动启用），未安装时给出明确指引；
-      * 麦克风采集：可选 sounddevice（本机安装后自动启用）。
+      * 麦克风采集：可选 sounddevice（本机安装后自动启用）；
+      * 音频播放：Windows winsound / Linux aplay 等（见 _play_wav 的降级链）。
   - 所有可选依赖均为延迟导入：未安装不影响系统其余功能。
   - 后端选择与失败降级：FallbackSpeaker 包装主/备两个 Speaker，降级必留痕
     （日志 + last_degradation 状态），绝不静默换声。
@@ -16,6 +17,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import shutil
+import subprocess
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +29,14 @@ from .cosyvoice_client import CosyVoiceClient, CosyVoiceClientError
 from .profiles import VoiceProfileError, VoiceProfileManager
 
 _log = logging.getLogger("butler.voice")
+
+# Linux/macOS 播放器降级链（树莓派默认装了 aplay：sudo apt install alsa-utils）
+_PLAYERS = (
+    ("aplay", ()),                                   # ALSA（树莓派 Raspberry Pi OS 默认）
+    ("paplay", ()),                                  # PulseAudio（桌面版 Linux）
+    ("afplay", ()),                                  # macOS
+    ("ffplay", ("-nodisp", "-autoexit", "-loglevel", "quiet")),  # ffmpeg 兜底
+)
 
 
 class VoiceError(Exception):
@@ -50,7 +62,12 @@ class Speaker:
 
 
 class SapiSpeaker(Speaker):
-    """Windows SAPI5 离线语音合成（pyttsx3）。"""
+    """系统本地 TTS 桥接（pyttsx3）：Windows 走 SAPI5，Linux 走 espeak。
+
+    类名保留 SapiSpeaker（历史调用与测试依赖）；pyttsx3 按运行平台自动选择
+    驱动：Windows=SAPI5（系统自带），Linux=espeak（树莓派需
+    `sudo apt install espeak-ng`，音质一般仅作兜底，正式播报建议 CosyVoice）。
+    """
 
     def __init__(self, rate: int = 180, volume: float = 1.0) -> None:
         try:
@@ -59,8 +76,8 @@ class SapiSpeaker(Speaker):
             raise VoiceError("pyttsx3 未安装：pip install pyttsx3") from exc
         try:
             self._engine = pyttsx3.init()
-        except Exception as exc:  # 无声卡/SAPI 异常等
-            raise VoiceError(f"Windows 语音引擎初始化失败：{exc}") from exc
+        except Exception as exc:  # 无声卡/SAPI/espeak 异常等
+            raise VoiceError(f"系统语音引擎初始化失败：{exc}") from exc
         self._engine.setProperty("rate", rate)
         self._engine.setProperty("volume", max(0.0, min(1.0, volume)))
 
@@ -233,7 +250,8 @@ class CosyVoiceSpeaker(Speaker):
 
     - voice_id=None：使用模型预设音色（inference_sft）；
     - voice_id=档案 ID：零样本克隆（inference_zero_shot），档案必须已获授权；
-    - 结果经 AudioCache 缓存；speak() 用 winsound 播放，speak_to_file() 落盘。
+    - 结果经 AudioCache 缓存；speak() 用系统播放器（winsound/aplay 等）播放，
+      speak_to_file() 落盘。
     合成失败抛 VoiceError（携带 degradable 标记），由调用方/降级层处理。
     """
 
@@ -284,11 +302,40 @@ class CosyVoiceSpeaker(Speaker):
         return wav
 
     def _play_wav(self, path: Path) -> None:
-        try:
-            import winsound
-        except ImportError as exc:
-            raise VoiceError("当前系统没有 winsound，无法播放合成音频") from exc
-        winsound.PlaySound(str(path), winsound.SND_FILENAME)
+        """跨平台播放：Windows 用 winsound；Linux/macOS 按降级链找播放器。
+
+        树莓派上 aplay 随 alsa-utils 预装；全链都没有时给出可读的安装指引。
+        """
+        if sys.platform == "win32":
+            try:
+                import winsound
+            except ImportError as exc:  # pragma: no cover - Windows 必有 winsound
+                raise VoiceError("当前系统没有 winsound，无法播放合成音频") from exc
+            winsound.PlaySound(str(path), winsound.SND_FILENAME)
+            return
+        if sys.platform != "linux" and sys.platform != "darwin":
+            raise VoiceError(
+                f"当前平台（{sys.platform}）没有已知的命令行音频播放器"
+            )
+        for player, flags in _PLAYERS:
+            exe = shutil.which(player)
+            if exe is None:
+                continue
+            proc = subprocess.run(
+                [exe, *flags, str(path)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+            if proc.returncode != 0:
+                detail = (proc.stderr or b"").decode("utf-8", "replace").strip()
+                raise VoiceError(
+                    f"{player} 播放失败（退出码 {proc.returncode}）"
+                    + (f"：{detail[:200]}" if detail else "")
+                )
+            return
+        raise VoiceError(
+            "未找到音频播放器（依次尝试：aplay/paplay/afplay/ffplay）。"
+            "树莓派安装：sudo apt install alsa-utils"
+        )
 
     def speak(self, text: str) -> None:
         wav = self.synthesize_bytes(text)

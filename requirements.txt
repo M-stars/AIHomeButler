@@ -19,5 +19,10 @@ websocket-client>=1.6
 # CosyVoice 后端为主项目新增的仅 HTTP 客户端（httpx 已含），无需额外依赖；
 # CosyVoice 服务端运行在独立 Python 3.10 环境，见 docs/COSYVOICE_SETUP.md
 
+# 树莓派 GPIO 直连（可选：仅 DEVICE_BACKEND=gpio 时需要，见 docs/PI_GPIO_TESTING.md）
+# gpiozero+lgpio 已随 Raspberry Pi OS 预装，勿在 PC 上安装运行 GPIO 后端；
+# DHT11/DHT22 传感器另需（Pi 上执行）：
+# adafruit-circuitpython-dht>=4.0
+
 # 测试
 pytest>=7.4.0

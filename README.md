@@ -36,6 +36,10 @@ ESP32 烧录差一步用户操作（见 docs/ROADMAP.md「近期待办」）。
 - **双设备后端**：`DEVICE_BACKEND=simulated`（默认，安全）或 `homeassistant`（真实设备，
   自动发现+动态能力——运行时枚举 HA 实体、按能力位标志推导每台设备可做的动作，
   高风险设备类型结构性排除，`DISCOVERY_ENABLED=0` 可回退手动白名单），Agent 层零改动切换。
+- **树莓派 GPIO 直连**（`DEVICE_BACKEND=gpio`）：40-pin IO 直接连接调控硬件——
+  LED/继电器（灯、开关）、PWM 风扇三档、DHT 温湿度、DS18B20、PIR 人体感应，
+  无需 HA；确认制/审计/回读验证与 HA 后端完全一致。
+  接线与安全见 [docs/PI_GPIO_TESTING.md](docs/PI_GPIO_TESTING.md)。
 - **家庭成员声纹**（阶段 13）：注册家人声纹后，语音模式自动识别谁在说话——
   称呼个性化、记忆按人隔离（陌生人只看共享记忆）、按成员切换回答音色；
   声纹仅用于个性化，不作为身份验证，确认流程不放松。
@@ -123,7 +127,7 @@ butler/
 ├── config.py         # 配置加载与校验（fail-fast）
 ├── logging_setup.py  # 滚动文件日志
 ├── memory/           # SQLite 长期记忆、任务日志、规则与通知
-├── devices/          # 设备抽象 + 模拟设备 + Home Assistant 适配器 + 注册表
+├── devices/          # 设备抽象 + 模拟设备 + Home Assistant 适配器 + GPIO 直连（树莓派）+ 注册表
 ├── emulator/         # HA REST API 本地模拟器（无 HA 也能联调适配器）
 ├── voice/            # 语音桥接：SAPI TTS + faster-whisper ASR + 麦克风 + 唤醒词
 ├── household/        # 家庭生活服务：食材管家 + 衣柜管家（台账/巡检/天气穿搭）
@@ -141,7 +145,8 @@ docs/                 # 需求/架构/选型/复用/路线图/RUNBOOK/硬件/语
 
 - 设备控制支持 8 类：sensor / light / fan / switch / cover（窗帘）/ climate（空调温控）/
   humidifier / vacuum；HA 白名单外的实体不暴露，lock / water_heater / alarm 等高风险
-  域不实现（安全设计）。
+  域不实现（安全设计）。GPIO 直连后端支持其中可直接接线的 4 类：
+  sensor（DHT/DS18B20/PIR）/ light / fan / switch（cover/climate 等需电机驱动协议，走 HA）。
 - ESP32 待烧录：固件已通过 ESPHome 2026.10.1 校验；此前编译产物（2025.5.2）基于旧实体名，
   插线后 `esphome run firmware/esphome/esp32-butler.yaml` 会自动重新编译并烧录。
 - 语音输入的噪声环境表现未做真实调试；无唤醒词（演进方向 HA Voice，见 docs/VOICE.md）。
