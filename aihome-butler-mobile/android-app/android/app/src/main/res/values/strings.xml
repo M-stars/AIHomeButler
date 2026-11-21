@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">AI家庭管家</string>
+    <string name="title_activity_main">AI家庭管家</string>
+    <string name="package_name">com.aihome.butler</string>
+    <string name="custom_url_scheme">com.aihome.butler</string>
+</resources>

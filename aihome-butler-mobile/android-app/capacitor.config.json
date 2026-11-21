@@ -1,0 +1,12 @@
+{
+  "appId": "com.aihome.butler",
+  "appName": "AI家庭管家",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": true
+  },
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  }
+}

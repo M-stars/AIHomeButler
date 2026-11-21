@@ -44,8 +44,9 @@ Python 单体应用，核心命题是——**用确定性的软件工程机制�
 - **移动端 PE 端 App 已落地**（2026-11-21，`aihome-butler-mobile/`，uni-app Vue3+TS+Pinia+Vite）：
   设计与验收以 `docs/MOBILE_APP_SPEC.md` 为准，UI 视觉对齐 `butler/web/` Web 控制台；
   H5/微信小程序产物构建通过，73 项 Vitest 独立离线测试全绿（`cd aihome-butler-mobile && npm run test`）；
-  配对/直控/确认审批/流水线/踢除 401 已对模拟后端端到端实测；Android APK 打包需
-  HBuilderX/Android SDK（当前环境未具备）。
+  配对/直控/确认审批/流水线/踢除 401 已对模拟后端端到端实测；**签名 APK 已产出**
+  （`android-app/`，Capacitor 7 壳工程本地 Gradle 构建，keystore 不入 git，
+  打包步骤与踩坑见 `android-app/README.md`；真机安装联调待做）。
 - PC 桌面壳曾在本地 `desktop-shell` 分支出现过，**主干已移除**——应用路线以
   `docs/APP_DESIGN.md`（V2：配对制 + 直控 + 云中转，阶段 15-18）为准。
 - 测试：33 个文件约 364 个测试函数，全部离线；README 里的"327 项"、REPO_STRUCTURE 里的"351 项"

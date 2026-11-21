@@ -1,0 +1,11 @@
+{
+  "name": "aihome-butler-android-shell",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Capacitor Android 壳工程：包壳 uni-app H5 产物为签名 APK（docs/APP_DESIGN.md 安卓路线）",
+  "dependencies": {
+    "@capacitor/android": "^7.6.10",
+    "@capacitor/cli": "^7.6.10",
+    "@capacitor/core": "^7.6.10"
+  }
+}

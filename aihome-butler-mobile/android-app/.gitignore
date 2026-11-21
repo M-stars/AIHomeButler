@@ -1,0 +1,14 @@
+# Capacitor Android 壳工程（构建产物与依赖不入 git）
+node_modules/
+www/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/keystore.properties
+android/*.keystore
+android/*.jks
+android/.idea/
+android/capacitor-cordova-android-plugins/
+.gradle-home/
+apk/
