@@ -58,6 +58,6 @@ cp app/build/outputs/apk/release/app-release.apk ../apk/AIHomeButler-v1.0.0-rele
 
 ## 已验证（2026-11-21）
 
-`AIHomeButler-v1.0.0-release.apk`（3.3MB，minSdk 23 / target 35）：
+`AIHomeButler-v1.0.0-release.apk`（3.3MB，minSdk 23 / target 35，已随仓库交付于 `android-app/apk/`）：
 apksigner 验签通过（CN=AI Home Butler, OU=GraduationProject）；badging 确认包名
 `com.aihome.butler`、应用名「AI家庭管家」、INTERNET 权限齐全。真机安装体验待 Pi/HA 环境联调。

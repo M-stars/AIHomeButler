@@ -1,4 +1,4 @@
-# Capacitor Android 壳工程（构建产物与依赖不入 git）
+# Capacitor Android 壳工程（构建中间产物不入 git；APK 成品入库交付）
 node_modules/
 www/
 android/.gradle/
@@ -11,4 +11,3 @@ android/*.jks
 android/.idea/
 android/capacitor-cordova-android-plugins/
 .gradle-home/
-apk/
